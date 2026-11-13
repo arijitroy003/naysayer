@@ -1,453 +1,278 @@
-# NAYSAYER - Dataproduct Config Review Bot
+# 🛡️ Naysayer - GitLab Automation Platform
 
-A self-service GitLab webhook for automatically reviewing warehouse size changes in dataproduct configurations.
+A multi-purpose GitLab webhook service that automates merge request validation, repository maintenance, and workflow optimization.
 
-## Purpose
+> **🎯 Smart Automation**: Validates MRs, maintains repositories, and keeps projects clean
 
-NAYSAYER helps the data platform team by automatically approving merge requests that only **decrease** warehouse sizes in `product.yaml` files, while requiring manual review for increases.
+## 🚀 What Naysayer Does
 
-**Self-Service Rules:**
-- ✅ **Warehouse size decrease** (LARGE → SMALL) → Auto-approve
-- 🚫 **Warehouse size increase** (SMALL → LARGE) → Platform approval needed
-- 🚫 **No warehouse changes** → Standard review process
+Naysayer provides three core capabilities through webhook endpoints:
 
-## Quick Start
+### 1. 📋 **MR Validation & Auto-Approval** (`/dataverse-product-config-review`)
+- ✅ **Auto-approves** safe changes (cost reductions, compliant configurations)
+- ⚠️ **Flags for review** risky changes (cost increases, security violations)
+- 🔍 **Validates** file content against organizational policies
+- 📝 **Documents** decisions with clear reasoning
 
-1. **Build and run locally**:
-   ```bash
-   make build
-   export GITLAB_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx
-   make run
-   ```
+### 2. 🔄 **Auto-Rebase** (`/auto-rebase`)
+- 🔀 **Automatically rebases** repository MRs when main branch is updated
+- ⚡ **Reduces merge conflicts** through proactive rebasing
+- 🤖 **Streamlines workflows** for infrastructure-as-code
+- 🔍 **Smart failure detection** - distinguishes state locks from actual plan failures
 
-2. **Deploy to Kubernetes/OpenShift**:
-   ```bash
-   # Configure GitLab token in config/secrets.yaml
-    kubectl apply -f config/
-   ```
+### 3. 🧹 **Stale MR Cleanup** (`/stale-mr-cleanup`)
+- 🗑️ **Closes stale MRs** (30+ days old)
+- 📊 **Maintains clean project state** across repositories
+- 🔄 **Stateless, pull-based** design (repos opt-in via CI)
 
-3. **Configure GitLab webhook** in your dataproduct-config repository:
+## 🛡️ Validation Rules
 
-   - URL: `https://your-naysayer-domain.com/webhook`
-   - Trigger: Merge Request events
-   - Secret: (optional)
+Naysayer includes built-in rules for:
+- **🏢 Cost Control** - Warehouse configuration validation
+- **🔒 Security** - Service account compliance
+- **👥 Access Management** - Consumer access auto-approval (NEW!)
+- **⚖️ TOC Approval** - TOC oversight for production deployments
+- **📄 Documentation** - Metadata and docs validation
 
-## How It Works
+> **📚 Complete Rule Details**: See [Rules Documentation](docs/rules/README.md) for what gets validated, troubleshooting, and examples.
 
-### Working Diagram and Code walkthrough
+## 🏗️ How It Works
+
+### Runtime and code walkthrough
+
+The product-config review path connects the HTTP handler, section-based rules,
+and GitLab API client. Draft merge requests are skipped before rule evaluation.
+The service also exposes independent auto-rebase and stale-MR cleanup routes.
 
 ```mermaid
 flowchart TB
-    %% External System
-    GitLab["Redhat GitLab"]:::external
-    GitLab -->|"Merge Request Event"| Webhook["POST /webhook (Webhook Receiver)"]:::transport
-
-  subgraph "NAYSAYER Container / Pod"
-        direction TB
-        ConfigLoader["Config Loader 
-        (internal/config)"]:::infra
-        Logger["Structured Logger (internal/logging)"]:::infra
-        Health["GET /health
-        (Health Checker)"]:::transport
-        Webhook
-        RulesManager["Rules Manager  (internal/rules/manager)"]:::business
-        WarehouseAnalyzer["Warehouse Analyzer \n(internal/rules/warehouse)"]:::business
-        Decision{"All decreases?"}:::business
-        AutoApprove["Auto-approve Path"]:::business
-        ManualReview["Manual review Path"]:::business
-        GitLabClient["GitLab API Client (internal/gitlab/client)"]:::infra
-    end
-
-    %% ConfigMap/Secrets
-    ConfigMap[(ConfigMap/Secrets Config)]:::infra
-    ConfigMap -->|loads| ConfigLoader
-
-    %% Internal Flow
-    Webhook -->|decode payload| RulesManager
-    RulesManager -->|invoke analyzer| WarehouseAnalyzer
-    WarehouseAnalyzer -->|evaluate diffs| Decision
-    Decision -->|yes| AutoApprove
-    Decision -->|no| ManualReview
-    AutoApprove -->|POST approval| GitLabClient
-    GitLabClient -->|GET changes| RulesManager
-
-    %% Health Check Flow
-    Health -->|returns 200| GitLab
-
-    %% Click Events
-    click Webhook "https://github.com/redhat-data-and-ai/naysayer/blob/main/cmd/main.go"
-    click Health "https://github.com/redhat-data-and-ai/naysayer/blob/main/internal/webhook/health.go"
-    click ConfigLoader "https://github.com/redhat-data-and-ai/naysayer/blob/main/internal/config/config.go"
-    click ConfigMap "https://github.com/redhat-data-and-ai/naysayer/tree/main/config/"
-    click GitLabClient "https://github.com/redhat-data-and-ai/naysayer/blob/main/internal/gitlab/client.go"
-    click RulesManager "https://github.com/redhat-data-and-ai/naysayer/blob/main/internal/rules/manager.go"
-    click WarehouseAnalyzer "https://github.com/redhat-data-and-ai/naysayer/blob/main/internal/rules/warehouse/analyzer.go"
-    click Logger "https://github.com/redhat-data-and-ai/naysayer/blob/main/internal/logging/logger.go"
-
-    %% Styles
-    classDef external fill:#e0f7e9,stroke:#2e7d32,color:#2e7d32;
-    classDef transport fill:#e3f2fd,stroke:#1565c0,color:#1565c0;
-    classDef business fill:#fff8e1,stroke:#f9a825,color:#f9a825;
-    classDef infra fill:#fff3e0,stroke:#ef6c00,color:#ef6c00;
+    GitLab["GitLab merge request event"] --> Review["POST /dataverse-product-config-review"]
+    Config["Environment configuration: internal/config"] --> App["Fiber application: cmd/main.go"]
+    Logging["Structured logging: internal/logging"] -.-> App
+    App --> Review
+    App --> Rebase["POST /auto-rebase"]
+    App --> Cleanup["POST /stale-mr-cleanup"]
+    Probe["Health probe"] --> Health["GET /health or /ready"]
+    App --> Health
+    Review --> Draft{"Draft MR?"}
+    Draft -->|Yes| Skip["Return skipped response"]
+    Draft -->|No| Evaluate["Handler loads MR context and evaluates rules"]
+    Evaluate --> Manager["Section-based rule manager: internal/rules"]
+    Rules["rules.yaml"] --> Manager
+    Evaluate <-->|MR changes and file content| Client["GitLab API client: internal/gitlab"]
+    Manager --> Decision{"Final decision"}
+    Decision -->|Approve| Approve["Approve with explanation"]
+    Decision -->|CommentOnly| Comment["Add informational comment"]
+    Decision -->|Manual review| Manual["Add manual-review explanation"]
+    Approve --> Client
+    Comment --> Client
+    Manual --> Client
+    Client <-->|API requests and responses| API["GitLab API"]
 ```
 
-NAYSAYER analyzes changes in `product.yaml` files within the dataproduct-config repository structure:
+Code entry points:
 
+- [Application setup and routes](cmd/main.go) load [configuration](internal/config/config.go) and initialize [logging](internal/logging/logger.go).
+- [Product-config webhook handler](internal/webhook/dataverse_product_config_review.go) extracts MR context, skips drafts, evaluates rules, and handles the decision.
+- [Rule-manager construction](internal/rules/rules.go) loads the section-based manager using [rules.yaml](rules.yaml).
+- [GitLab client](internal/gitlab/client.go) supplies MR data and sends approvals and comments.
+- [Health handlers](internal/webhook/health.go) serve the probe endpoints.
+
+Naysayer uses **Section-Based Validation Architecture** for granular, configurable rule processing:
+
+```mermaid
+graph TD
+    A[📥 GitLab MR] --> B[📄 File Analysis]
+    B --> C{Section-Based Config?}
+    C -->|Yes| D[🧩 YAML Section Parsing]
+    C -->|No| E[📏 Traditional Validation]
+    
+    D --> F[Extract File Sections]
+    F --> G[Section 1: warehouses]
+    F --> H[Section 2: service_account]
+    F --> I[Section N: custom]
+    
+    G --> J[🏢 Apply warehouse_rule]
+    H --> K[🔒 Apply service_account_rule]
+    I --> L[🎯 Apply section rules]
+    
+    E --> M[Apply all rules to file]
+    
+    J --> N{All Sections Valid?}
+    K --> N
+    L --> N
+    M --> O{All Rules Pass?}
+    
+    N -->|✅ All sections pass| P[🎉 Auto-Approve MR]
+    N -->|❌ Section failures| Q[🔍 Manual Review Required]
+    O -->|✅ All rules pass| P
+    O -->|❌ Rule failures| Q
+    
+    classDef startEnd fill:#e1f5fe,stroke:#01579b,stroke-width:2px,color:#000
+    classDef process fill:#f3e5f5,stroke:#4a148c,stroke-width:2px,color:#000
+    classDef decision fill:#fff3e0,stroke:#e65100,stroke-width:2px,color:#000
+    classDef section fill:#e8f5e8,stroke:#2e7d32,stroke-width:2px,color:#000
+    classDef rule fill:#fff8e1,stroke:#f57f17,stroke-width:2px,color:#000
+    classDef success fill:#e8f5e8,stroke:#388e3c,stroke-width:3px,color:#000
+    classDef review fill:#ffebee,stroke:#d32f2f,stroke-width:2px,color:#000
+    
+    class A,P startEnd
+    class B,D,E,F,M process
+    class C,N,O decision
+    class G,H,I section
+    class J,K,L rule
+    class P success
+    class Q review
 ```
-dataproducts/
-├── source/product-name/env/product.yaml
-├── aggregate/product-name/env/product.yaml
-└── platform/product-name/env/product.yaml
-```
 
-### Dataproduct YAML Format
+**🆕 Section-Based Features**:
+- 🎯 **Granular Control**: Rules target specific YAML sections (e.g., `warehouses`, `service_account.dbt`)
+- 🧩 **Configurable Mapping**: Rules and sections defined in `rules.yaml` configuration
+- 📊 **Coverage Tracking**: Ensures all sections are validated by appropriate rules
+- 🔧 **Modular Validation**: Different rules can validate different sections of the same file
+- 📝 **Enhanced Reporting**: Section-by-section validation results with line-level detail
 
-```yaml
-name: your-dataproduct
-kind: source-aligned  # or aggregated
-rover_group: dataverse-source-your-dataproduct
-warehouses:
-  - type: user
-    size: XSMALL          # ← NAYSAYER analyzes this
-  - type: service_account
-    size: LARGE           # ← and this
-```
+## 🚀 Quick Start
 
-### Approval Logic
-
-- **Auto-approve**: Warehouse size decreases only
-  - `X6LARGE(10) → X5LARGE(9)` ✅
-  - `X5LARGE(9) → X4LARGE(8)` ✅
-  - `X4LARGE(8) → X3LARGE(7)` ✅
-  - `X3LARGE(7) → XXLARGE(6)` ✅
-  - `XXLARGE(6) → XLARGE(5)` ✅
-  - `XLARGE(5) → LARGE(4)` ✅
-  - `LARGE(4) → MEDIUM(3)` ✅
-  - `MEDIUM(3) → SMALL(2)` ✅
-  - `SMALL(2) → XSMALL(1)` ✅
-
-- **Require approval**: Any increase or no warehouse changes
-  - `SMALL(2) → MEDIUM(3)` ❌ (platform approval needed)
-  - No warehouse changes ❌ (standard review process)
-
-## Repository Integration
-
-NAYSAYER is designed specifically for the dataproduct-config repository at:
-`go/src/gitlab.com/ddis/repos/dataproduct-config`
-
-It understands the DDIS dataproduct structure and focuses only on `product.yaml` files.
-
-## Configuration
-
-**Environment Variables:**
-- `GITLAB_TOKEN` - GitLab API token (required for file analysis)
-- `GITLAB_BASE_URL` - GitLab instance URL (default: https://gitlab.com)
-- `PORT` - Server port (default: 3000)
-
-## Deployment
-
-### Kubernetes/OpenShift
-
-1. **Configure secrets**:
-   ```bash
-   echo -n "your-gitlab-token" | base64
-   # Update gitlab-token in config/secrets.yaml
-   ```
-
-2. **Deploy**:
-   ```bash
-   kubectl apply -f config/
-   ```
-
-3. **Image management** (push to Quay):
-   ```bash
-   make build-image
-   make push-image
-   ```
-
-### Container Image
-
-- Registry: `quay.io/ddis/naysayer`
-- Tag: `latest`
-
-## API Endpoints
-
-- `POST /webhook` - GitLab webhook endpoint
-- `GET /health` - Health check
-
-## Testing
-
-Basic functionality:
+### 1. Deploy Naysayer
 ```bash
-./test_simple.sh
-```
+# Deploy to Kubernetes/OpenShift
+kubectl apply -f config/
 
-File analysis with real GitLab API:
-```bash
+# Or run locally for development
 export GITLAB_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx
-./test_file_analysis.sh
+make build && make run
 ```
 
-## Self-Service Benefits
+### 2. Configure GitLab Webhook
+1. Go to GitLab project → **Settings** → **Webhooks**
+2. Add URL: `https://your-naysayer-domain.com/dataverse-product-config-review`
+3. Select **"Merge request events"**
+4. Save configuration
 
-- **Faster approvals** for warehouse downsizing
-- **Platform team focus** on increases and complex changes  
-- **Automated compliance** with resource optimization
-- **Clear audit trail** in GitLab MR comments
+### 3. Test It
+Create an MR with configuration changes and Naysayer will automatically validate and provide feedback.
 
-## How It Works (Technical Details)
+**Result**: Safe changes get auto-approved, risky changes get flagged for review
 
-### File Analysis Process
+## ⚙️ Configuration
 
-1. **Webhook received** → Extract project ID and MR IID
-2. **Fetch file changes** → Call GitLab API `/projects/:id/merge_requests/:iid/changes`
-3. **Analyze config files** → Look for warehouse changes in YAML/JSON files
-4. **Check diff patterns** → Find `-  warehouse: LARGE` → `+  warehouse: SMALL`
-5. **Make decision** → Auto-approve only if all changes are decreases
-
-### Supported File Types
-
-- `.yaml` and `.yml` files
-- `.json` files
-- Looks for `warehouse:` configuration changes
-
-### Example File Change
-
-The bot analyzes diffs like this:
-
-```diff
-# config/dataproduct.yaml
-- warehouse: LARGE
-+ warehouse: SMALL
-```
-
-**Result:** ✅ Auto-approved (decrease detected)
-
-```diff
-# config/dataproduct.yaml
-- warehouse: SMALL  
-+ warehouse: LARGE
-```
-
-**Result:** 🚫 Requires approval (increase detected)
-
-## Usage
-
-### GitLab Webhook Setup
-
-1. Go to your GitLab project → Settings → Webhooks
-2. Add webhook URL: `http://your-server:3000/webhook`
-3. Select "Merge request events"
-4. Save
-
-### Test It
+Basic configuration via environment variables:
 
 ```bash
-# Test with mock GitLab webhook payload
-curl -X POST your-server:3000/webhook \
-  -H "Content-Type: application/json" \
-  -d '{
-    "object_attributes": {
-      "iid": 123
-    },
-    "project": {
-      "id": 456
-    }
-  }'
+# Required
+GITLAB_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx
 
-# Response with GitLab token:
-# {
-#   "auto_approve": true,
-#   "reason": "all warehouse changes are decreases",
-#   "summary": "✅ Warehouse decrease(s) - auto-approved",
-#   "details": "Found 1 warehouse decrease(s)"
-# }
+# Optional
+GITLAB_BASE_URL=https://gitlab.com
+PORT=3000
 
-# Response without GitLab token:
-# {
-#   "auto_approve": false,
-#   "reason": "GitLab token not configured",
-#   "summary": "🚫 Cannot analyze files - missing GitLab token",
-#   "details": "Set GITLAB_TOKEN environment variable to enable file analysis"
-# }
+# Rule toggles
+WAREHOUSE_RULE_ENABLED=true
 ```
 
-## Warehouse Sizes
+> **📖 Complete Configuration**: See [Development Setup Guide](docs/DEVELOPMENT_SETUP.md) for all rule-specific settings.
 
-```
-XSMALL (1) → SMALL (2) → MEDIUM (3) → LARGE (4) → XXLARGE (5)
-```
+## 🎯 Auto-Approval Logic
 
-**Decreases** (higher → lower) are auto-approved.  
-**Increases** (lower → higher) require approval.
+### ✅ **When MRs Get Auto-Approved**
 
-## API Endpoints
+| **Change Type** | **Risk Level** | **Auto-Approval** | **Business Rationale** |
+|-----------------|----------------|-------------------|------------------------|
+| Documentation | 🟢 **Low** | ✅ Always | Zero operational risk |
+| Warehouse Reduction | 🟢 **Low** | ✅ Yes | Cost savings (~$50k/month) |
+| Service Account (Astro) | 🟡 **Medium** | ✅ Conditional | Automated accounts with naming compliance |
+| Warehouse Increase | 🟡 **Medium** | ❌ Never | Requires budget approval |
+| Service Account (Other) | 🔴 **High** | ❌ Never | Security review required |
+| **New Product (Prod)** | 🔴 **High** | ❌ Never | Requires TOC governance approval |
 
-- **POST /webhook** - Main webhook endpoint
-- **GET /health** - Health check
+### 🚫 **Manual Review Triggers**
 
-## Project Structure
+- **Cost Increases** - Warehouse size increases require budget approval
+- **New Production Deployments** - New product.yaml files in preprod/prod require TOC approval
+- **Security Violations** - Hardcoded secrets, invalid domains
+- **Configuration Errors** - YAML syntax errors, missing fields
+- **Uncovered Changes** - Lines not validated by any rule
 
-```
-naysayer/
-├── cmd/main.go              # Complete application (360+ lines)
-├── go.mod                   # Dependencies (GoFiber + YAML)
-├── go.sum
-├── Makefile                 # Build commands
-└── README.md                # This file
-```
+> **🔍 Compliance Details**: For complete audit trails, risk matrices, and compliance procedures, see detailed rule documentation.
 
-## Error Handling
+## 📚 Documentation
 
-### Common Issues
+### 🏗️ Architecture
+- 🆕 **[Section-Based Architecture](docs/SECTION_BASED_ARCHITECTURE.md)** - Complete architecture overview with Mermaid diagrams
+- 📡 **[API Reference](docs/API_REFERENCE.md)** - Updated endpoints and configuration
 
-**Missing GitLab Token:**
-```json
-{
-  "auto_approve": false,
-  "reason": "GitLab token not configured",
-  "summary": "🚫 Cannot analyze files - missing GitLab token"
-}
-```
+### 👥 For Users
+- 🏠 **[Rules Overview](docs/rules/README.md)** - Understand what gets validated
+- 🔧 **[Troubleshooting Guide](docs/TROUBLESHOOTING.md)** - Fix common issues
+- ⚙️ **[Configuration Guide](docs/DEVELOPMENT_SETUP.md)** - Environment setup
 
-**GitLab API Error:**
-```json
-{
-  "auto_approve": false,
-  "reason": "Failed to fetch file changes",
-  "summary": "🚫 API error - requires manual approval",
-  "details": "Error: GitLab API error 401: Unauthorized"
-}
-```
+### 👨‍💻 For Developers
+- 🎯 **[Rule Creation Guide](docs/RULE_CREATION_GUIDE.md)** - Build new validation rules
+- 🧪 **[E2E Testing Guide](e2e/README.md)** - End-to-end testing framework
+- 🔧 **[Development Setup Guide](docs/DEVELOPMENT_SETUP.md)** - Testing strategies and development setup
 
-**No Warehouse Changes:**
-```json
-{
-  "auto_approve": false,
-  "reason": "no warehouse changes detected in files",
-  "summary": "🚫 No warehouse changes - requires approval"
-}
-```
+### 🚀 For Operators
+- 🐳 **[Deployment Guide](DEPLOYMENT.md)** - Production setup
+- 📊 **[Troubleshooting Guide](docs/TROUBLESHOOTING.md)** - Health checks and debugging
 
-## Deployment
+## 🛠️ Development
 
-### Docker
-
-```dockerfile
-FROM golang:1.23-alpine AS builder
-WORKDIR /app
-COPY . .
-RUN go build -o naysayer cmd/main.go
-
-FROM alpine:latest
-RUN apk --no-cache add ca-certificates
-WORKDIR /root/
-COPY --from=builder /app/naysayer .
-EXPOSE 3000
-CMD ["./naysayer"]
-```
-
-### Environment Setup
+Quick setup for developers:
 
 ```bash
-# Set required GitLab token
-export GITLAB_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx
+# Clone and setup
+git clone https://github.com/your-org/naysayer.git
+cd naysayer && make install
 
-# Optional: Set custom GitLab URL (for self-hosted)
-export GITLAB_BASE_URL=https://gitlab.mycompany.com
+# Run tests
+make test
 
-# Optional: Set custom port
-export PORT=8080
+# Start development server
+export GITLAB_TOKEN=your-token
+make run
 ```
 
-### Systemd Service
+For complete development setup, testing guides, and project structure details, see the [Development Guide](docs/DEVELOPMENT_SETUP.md).
 
-```ini
-# /etc/systemd/system/naysayer.service
-[Unit]
-Description=NAYSAYER File-Based Webhook Service
-After=network.target
+## 🔒 Security & Compliance
 
-[Service]
-Type=simple
-User=naysayer
-ExecStart=/opt/naysayer/naysayer
-Environment=PORT=3000
-Environment=GITLAB_TOKEN=your_token_here
-Environment=GITLAB_BASE_URL=https://gitlab.com
-Restart=always
+- **Minimal Permissions**: GitLab token only needs `read_repository` scope
+- **Audit Trail**: All decisions logged with detailed reasoning  
+- **Input Validation**: All webhook payloads validated
+- **Policy Enforcement**: Consistent application of organizational standards
 
-[Install]
-WantedBy=multi-user.target
-```
+## 🎯 Benefits
 
-## Development
+- **⚡ Faster Reviews**: Safe changes approved automatically
+- **🛡️ Risk Reduction**: Automated detection of policy violations  
+- **📏 Consistency**: Uniform application of organizational standards
+- **🔍 Transparency**: Clear explanations for all decisions
+
+## 🚀 Deployment
+
+Naysayer deployment configs are maintained in this repository (`/config/`).
+
+### Quick Deploy
 
 ```bash
-# Install dependencies
-go mod tidy
-
-# Build
-go build -o naysayer cmd/main.go
-
-# Run with debug logging
-go run cmd/main.go
-
-# Test health endpoint
-curl http://localhost:3000/health
+# Deploy from this repository
+kubectl apply -f config/
 ```
 
-## Why File-Based Analysis?
+**For complete setup**: See [Deployment Guide](DEPLOYMENT.md)
 
-**Previous Approach:** Analyzed MR titles for patterns like "Warehouse from LARGE to SMALL"
-- ❌ Unreliable (depends on title format)
-- ❌ Easy to bypass
-- ❌ No validation of actual changes
+**Health Check**: `GET /health`
 
-**Current Approach:** Analyzes actual file diffs for warehouse configuration changes
-- ✅ **Accurate** - sees real file changes
-- ✅ **Secure** - can't be bypassed with clever titles
-- ✅ **Reliable** - works regardless of MR title format
-- ✅ **Detailed** - knows which files changed and how
+## 🤝 Contributing
 
-## Troubleshooting
+1. Read [Rule Creation Guide](docs/RULE_CREATION_GUIDE.md)
+2. Follow development guidelines and patterns
+3. Update documentation in `docs/rules/`
 
-### Check GitLab Token
+---
 
-```bash
-# Test your token manually
-curl -H "Authorization: Bearer $GITLAB_TOKEN" \
-  https://gitlab.com/api/v4/projects/YOUR_PROJECT_ID/merge_requests/YOUR_MR_IID/changes
-```
-
-### Verify Webhook Payload
-
-```bash
-# Check webhook is sending correct data
-curl -X POST localhost:3000/webhook \
-  -H "Content-Type: application/json" \
-  -d @webhook_payload.json
-```
-
-### Debug Mode
-
-Set log level for detailed debugging:
-```bash
-# Run with verbose logging
-go run cmd/main.go 2>&1 | tee naysayer.log
-```
-
-## Security
-
-- GitLab API token should have minimal scopes (`read_repository`)
-- Use environment variables for sensitive configuration
-- Consider webhook signature validation for production use
-- Run with restricted user permissions
-
-## Contributing
-
-The goal is to keep this focused on file-based warehouse analysis. Before adding features, ask: "Does this improve warehouse change detection?"
-
-## License
-
-Dual licensed under Apache 2.0 and MIT licenses.
+**🚀 Ready to get started?** 
+- **Users**: Check [Rules Documentation](docs/rules/README.md) to understand what Naysayer validates
+- **Developers**: See [Rule Creation Guide](docs/RULE_CREATION_GUIDE.md) to build custom rules
+- **Operators**: Follow [Deployment Guide](DEPLOYMENT.md) for production setup

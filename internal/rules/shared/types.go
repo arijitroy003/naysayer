@@ -1,19 +1,20 @@
 package shared
 
 import (
-	"fmt"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/redhat-data-and-ai/naysayer/internal/gitlab"
 )
 
-// Decision represents a binary approval decision
+// DecisionType represents a binary approval decision
 type DecisionType string
 
 const (
 	Approve      DecisionType = "approve"       // Auto-approve the MR
 	ManualReview DecisionType = "manual_review" // Require manual approval
+	CommentOnly  DecisionType = "comment_only"  // Post informational comment, no MR action
 )
 
 // Decision represents a simplified approval decision for a merge request
@@ -35,13 +36,25 @@ type RuleResult struct {
 
 // MRContext contains all information needed for rule evaluation
 type MRContext struct {
-	ProjectID   int                 `json:"project_id"`
-	MRIID       int                 `json:"mr_iid"`
-	Changes     []gitlab.FileChange `json:"changes"`
-	MRInfo      *gitlab.MRInfo      `json:"mr_info"`
-	Environment string              `json:"environment,omitempty"`
-	Labels      []string            `json:"labels,omitempty"`
-	Metadata    map[string]any      `json:"metadata,omitempty"`
+	ProjectID       int                 `json:"project_id"`
+	SourceProjectID int                 `json:"source_project_id,omitempty"`
+	MRIID           int                 `json:"mr_iid"`
+	Changes         []gitlab.FileChange `json:"changes"`
+	MRInfo          *gitlab.MRInfo      `json:"mr_info"`
+	Environment     string              `json:"environment,omitempty"`
+	Labels          []string            `json:"labels,omitempty"`
+	Metadata        map[string]any      `json:"metadata,omitempty"`
+}
+
+// SourceBranchProjectID returns the GitLab project that holds the MR source branch.
+func (m *MRContext) SourceBranchProjectID() int {
+	if m == nil {
+		return 0
+	}
+	if m.SourceProjectID != 0 {
+		return m.SourceProjectID
+	}
+	return m.ProjectID
 }
 
 // Rule defines a simplified interface for all rules
@@ -52,11 +65,19 @@ type Rule interface {
 	// Description returns a human-readable description
 	Description() string
 
-	// Applies checks if this rule should be evaluated for the given MR
-	Applies(mrCtx *MRContext) bool
+	// Returns which line ranges this rule validates in a file
+	GetCoveredLines(filePath string, fileContent string) []LineRange
 
-	// ShouldApprove executes the rule logic and returns a binary decision
-	ShouldApprove(mrCtx *MRContext) (DecisionType, string)
+	// Validates only the specified line ranges
+	ValidateLines(filePath string, fileContent string, lineRanges []LineRange) (DecisionType, string)
+}
+
+// ContextAwareRule is an optional interface that rules can implement to access MR context
+type ContextAwareRule interface {
+	Rule
+
+	// SetMRContext provides the full MR context to the rule for advanced analysis
+	SetMRContext(mrCtx *MRContext)
 }
 
 // RuleManager manages and executes rules with simple logic
@@ -68,11 +89,46 @@ type RuleManager interface {
 	EvaluateAll(mrCtx *MRContext) *RuleEvaluation
 }
 
+// LineRange represents a range of lines in a file
+type LineRange struct {
+	StartLine int    `json:"start_line"`
+	EndLine   int    `json:"end_line"`
+	FilePath  string `json:"file_path"`
+}
+
+// LineValidationResult represents validation result for specific lines
+type LineValidationResult struct {
+	RuleName     string       `json:"rule_name"`
+	LineRanges   []LineRange  `json:"line_ranges"`
+	Decision     DecisionType `json:"decision"`
+	Reason       string       `json:"reason"`
+	WasEvaluated bool         `json:"was_evaluated"` // true if rule actually executed (vs skipped)
+}
+
+// FileValidationSummary shows validation results for a single file
+type FileValidationSummary struct {
+	FilePath       string                 `json:"file_path"`
+	TotalLines     int                    `json:"total_lines"`
+	CoveredLines   []LineRange            `json:"covered_lines"`
+	UncoveredLines []LineRange            `json:"uncovered_lines"`
+	RuleResults    []LineValidationResult `json:"rule_results"`
+	FileDecision   DecisionType           `json:"file_decision"`
+}
+
 // RuleEvaluation contains the results of evaluating all rules
 type RuleEvaluation struct {
-	FinalDecision Decision      `json:"final_decision"`
-	RuleResults   []RuleResult  `json:"rule_results"`
-	ExecutionTime time.Duration `json:"execution_time"`
+	FinalDecision   Decision                          `json:"final_decision"`
+	FileValidations map[string]*FileValidationSummary `json:"file_validations"` // filePath -> summary
+	ExecutionTime   time.Duration                     `json:"execution_time"`
+
+	// Summary statistics
+	TotalFiles     int `json:"total_files"`
+	ApprovedFiles  int `json:"approved_files"`
+	ReviewFiles    int `json:"review_files"`
+	UncoveredFiles int `json:"uncovered_files"`
+
+	// Files skipped by ignore_files configuration
+	IgnoredFiles []string `json:"ignored_files,omitempty"`
 }
 
 // Common helper functions for rule evaluation
@@ -108,108 +164,92 @@ func IsAutomatedUser(mrCtx *MRContext) bool {
 	return false
 }
 
-// DataverseFileType represents different types of dataverse configuration files
-type DataverseFileType string
+// Helper functions for line range operations
 
-const (
-	WarehouseFile     DataverseFileType = "warehouse"
-	SourceBindingFile DataverseFileType = "sourcebinding"
-	// Future file types can be added here: ConfigFile, SchemaFile, etc.
-)
-
-// IsDataverseFile checks if a file is a dataverse configuration file and returns its type
-func IsDataverseFile(path string) (bool, DataverseFileType) {
-	if path == "" {
-		return false, ""
+// ContainsLine checks if a line number is within any of the given line ranges
+func ContainsLine(lineRanges []LineRange, lineNumber int) bool {
+	for _, lr := range lineRanges {
+		if lineNumber >= lr.StartLine && lineNumber <= lr.EndLine {
+			return true
+		}
 	}
-
-	lowerPath := strings.ToLower(path)
-
-	// Check for warehouse files (product.yaml)
-	if strings.HasSuffix(lowerPath, "product.yaml") || strings.HasSuffix(lowerPath, "product.yml") {
-		return true, WarehouseFile
-	}
-
-	// Check for sourcebinding files
-	if strings.HasSuffix(lowerPath, "sourcebinding.yaml") || strings.HasSuffix(lowerPath, "sourcebinding.yml") {
-		return true, SourceBindingFile
-	}
-
-	return false, ""
+	return false
 }
 
-// AnalyzeDataverseChanges analyzes file changes and returns counts by dataverse file type
-func AnalyzeDataverseChanges(changes []gitlab.FileChange) map[DataverseFileType]int {
-	fileTypes := make(map[DataverseFileType]int)
+// MergeLineRanges combines overlapping or adjacent line ranges
+func MergeLineRanges(ranges []LineRange) []LineRange {
+	if len(ranges) <= 1 {
+		return ranges
+	}
 
-	for _, change := range changes {
-		// Check both old and new paths for file type detection
-		paths := []string{change.NewPath, change.OldPath}
+	// Sort by start line
+	// First, copy the ranges to avoid modifying the input
+	sorted := make([]LineRange, len(ranges))
+	copy(sorted, ranges)
 
-		for _, path := range paths {
-			if isDataverse, fileType := IsDataverseFile(path); isDataverse {
-				fileTypes[fileType]++
-				break // Don't double count if both paths are same type
+	// Sort by StartLine using standard library
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].StartLine < sorted[j].StartLine
+	})
+
+	var merged []LineRange
+	for _, r := range sorted {
+		if len(merged) == 0 {
+			merged = append(merged, r)
+			continue
+		}
+
+		last := &merged[len(merged)-1]
+		if r.StartLine <= last.EndLine+1 {
+			// Overlapping or adjacent - merge
+			if r.EndLine > last.EndLine {
+				last.EndLine = r.EndLine
 			}
+		} else {
+			// Non-overlapping - add new range
+			merged = append(merged, r)
 		}
 	}
 
-	return fileTypes
+	return merged
 }
 
-// AreAllDataverseSafe checks if all file changes are dataverse-safe files
-func AreAllDataverseSafe(changes []gitlab.FileChange) bool {
-	for _, change := range changes {
-		// Check if at least one of the paths (new or old) is a dataverse file
-		newIsDataverse, _ := IsDataverseFile(change.NewPath)
-		oldIsDataverse, _ := IsDataverseFile(change.OldPath)
-
-		if !newIsDataverse && !oldIsDataverse {
-			return false
-		}
+// GetUncoveredLines returns line ranges that are not covered by any of the given ranges
+func GetUncoveredLines(totalLines int, coveredRanges []LineRange) []LineRange {
+	if totalLines == 0 {
+		return nil
 	}
 
-	return true
+	merged := MergeLineRanges(coveredRanges)
+	var uncovered []LineRange
+
+	currentLine := 1
+	for _, covered := range merged {
+		if currentLine < covered.StartLine {
+			// Gap before this covered range
+			uncovered = append(uncovered, LineRange{
+				StartLine: currentLine,
+				EndLine:   covered.StartLine - 1,
+			})
+		}
+		currentLine = covered.EndLine + 1
+	}
+
+	// Check for gap after last covered range
+	if currentLine <= totalLines {
+		uncovered = append(uncovered, LineRange{
+			StartLine: currentLine,
+			EndLine:   totalLines,
+		})
+	}
+
+	return uncovered
 }
 
-// BuildDataverseApprovalMessage creates a dynamic approval message based on file types
-func BuildDataverseApprovalMessage(fileTypes map[DataverseFileType]int) string {
-	if len(fileTypes) == 0 {
-		return "Auto-approving MR with no dataverse file changes"
+// CountLines counts the number of lines in a string
+func CountLines(content string) int {
+	if content == "" {
+		return 0
 	}
-
-	var parts []string
-
-	// Add parts in a consistent order
-	if count := fileTypes[WarehouseFile]; count > 0 {
-		if count == 1 {
-			parts = append(parts, "1 warehouse")
-		} else {
-			parts = append(parts, fmt.Sprintf("%d warehouse", count))
-		}
-	}
-
-	if count := fileTypes[SourceBindingFile]; count > 0 {
-		if count == 1 {
-			parts = append(parts, "1 sourcebinding")
-		} else {
-			parts = append(parts, fmt.Sprintf("%d sourcebinding", count))
-		}
-	}
-
-	// Join parts with proper grammar
-	var changeDesc string
-	switch len(parts) {
-	case 0:
-		changeDesc = "no changes"
-	case 1:
-		changeDesc = parts[0] + " changes"
-	case 2:
-		changeDesc = parts[0] + " and " + parts[1] + " changes"
-	default:
-		// For future expansion with more file types
-		changeDesc = strings.Join(parts[:len(parts)-1], ", ") + " and " + parts[len(parts)-1] + " changes"
-	}
-
-	return fmt.Sprintf("Auto-approving MR with only %s", changeDesc)
+	return strings.Count(content, "\n") + 1
 }

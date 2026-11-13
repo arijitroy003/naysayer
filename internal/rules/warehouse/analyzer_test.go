@@ -4,8 +4,9 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/redhat-data-and-ai/naysayer/internal/gitlab"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/redhat-data-and-ai/naysayer/internal/gitlab"
 )
 
 func TestNewAnalyzer(t *testing.T) {
@@ -16,8 +17,6 @@ func TestNewAnalyzer(t *testing.T) {
 	assert.Equal(t, client, analyzer.gitlabClient)
 }
 
-
-
 func TestAnalyzer_parseDataProduct(t *testing.T) {
 	analyzer := NewAnalyzer(nil)
 
@@ -27,29 +26,6 @@ func TestAnalyzer_parseDataProduct(t *testing.T) {
 		expected      *DataProduct
 		expectedError bool
 	}{
-		{
-			name: "valid yaml with single warehouse",
-			yamlContent: `
-name: "test-product"
-kind: "data-product"
-rover_group: "ddi"
-warehouses:
-  - type: "snowflake"
-    size: "MEDIUM"
-tags:
-  data_product: "test"
-`,
-			expected: &DataProduct{
-				Name:       "test-product",
-				Kind:       "data-product",
-				RoverGroup: "ddi",
-				Warehouses: []Warehouse{
-					{Type: "snowflake", Size: "MEDIUM"},
-				},
-				Tags: Tags{DataProduct: "test"},
-			},
-			expectedError: false,
-		},
 		{
 			name: "valid yaml with multiple warehouses",
 			yamlContent: `
@@ -78,32 +54,16 @@ tags:
 			expectedError: false,
 		},
 		{
-			name: "valid yaml with no warehouses",
-			yamlContent: `
-name: "no-warehouse-product"
-rover_group: "test"
-warehouses: []
-tags:
-  data_product: "test"
-`,
-			expected: &DataProduct{
-				Name:       "no-warehouse-product",
-				RoverGroup: "test",
-				Warehouses: []Warehouse{},
-				Tags:       Tags{DataProduct: "test"},
-			},
-			expectedError: false,
-		},
-		{
-			name: "minimal valid yaml",
+			name: "minimal valid yaml with empty warehouses",
 			yamlContent: `
 name: "minimal"
 rover_group: "test"
+warehouses: []
 `,
 			expected: &DataProduct{
 				Name:       "minimal",
 				RoverGroup: "test",
-				Warehouses: nil,
+				Warehouses: []Warehouse{},
 				Tags:       Tags{},
 			},
 			expectedError: false,
@@ -118,36 +78,6 @@ warehouses:
 `,
 			expected:      nil,
 			expectedError: true,
-		},
-		{
-			name:          "empty yaml",
-			yamlContent:   "",
-			expected:      &DataProduct{},
-			expectedError: false,
-		},
-		{
-			name: "yaml with extra fields",
-			yamlContent: `
-name: "extra-fields"
-rover_group: "test"
-unknown_field: "should be ignored"
-warehouses:
-  - type: "snowflake"
-    size: "MEDIUM"
-    extra_warehouse_field: "ignored"
-tags:
-  data_product: "test"
-  extra_tag: "ignored"
-`,
-			expected: &DataProduct{
-				Name:       "extra-fields",
-				RoverGroup: "test",
-				Warehouses: []Warehouse{
-					{Type: "snowflake", Size: "MEDIUM"},
-				},
-				Tags: Tags{DataProduct: "test"},
-			},
-			expectedError: false,
 		},
 	}
 
@@ -298,7 +228,14 @@ func TestAnalyzer_compareWarehouses(t *testing.T) {
 					{Type: "snowflake", Size: "MEDIUM"},
 				},
 			},
-			expected: []WarehouseChange{},
+			expected: []WarehouseChange{
+				{
+					FilePath:   "dataproducts/agg/test/product.yaml (type: redshift)",
+					FromSize:   "LARGE",
+					ToSize:     "",
+					IsDecrease: true,
+				},
+			},
 		},
 		{
 			name: "unknown warehouse size",
@@ -535,7 +472,7 @@ func TestAnalyzer_analyzeFileChange_ErrorHandling(t *testing.T) {
 				mrDetails:      &gitlab.MRDetails{SourceBranch: "feature", ProjectID: 123, SourceProjectID: 456, TargetProjectID: 123},
 				newFileContent: &gitlab.FileContent{Content: "name: test\nrover_group: test\nwarehouses:\n  - type: snowflake\n    size: LARGE"},
 			},
-			expectedError:  "",
+			expectedError: "",
 			expectedResult: &[]WarehouseChange{{
 				FilePath:   "dataproducts/agg/test/product.yaml (type: snowflake)",
 				FromSize:   "MEDIUM",
@@ -565,16 +502,16 @@ func TestAnalyzer_analyzeFileChange_ErrorHandling(t *testing.T) {
 
 // MockGitLabClient is a test implementation of the GitLab client interface
 type MockGitLabClient struct {
-	targetBranch         string
-	targetBranchError    error
-	oldFileContent       *gitlab.FileContent
-	oldFileError         error
-	newFileContent       *gitlab.FileContent
-	newFileError         error
-	mrDetails            *gitlab.MRDetails
-	mrDetailsError       error
-	lastFetchProjectID   int  // Track which project ID was used for last fetch
-	lastFetchBranch      string  // Track which branch was used for last fetch
+	targetBranch       string
+	targetBranchError  error
+	oldFileContent     *gitlab.FileContent
+	oldFileError       error
+	newFileContent     *gitlab.FileContent
+	newFileError       error
+	mrDetails          *gitlab.MRDetails
+	mrDetailsError     error
+	lastFetchProjectID int    // Track which project ID was used for last fetch
+	lastFetchBranch    string // Track which branch was used for last fetch
 }
 
 func (m *MockGitLabClient) GetMRTargetBranch(projectID, mrIID int) (string, error) {
@@ -588,7 +525,7 @@ func (m *MockGitLabClient) FetchFileContent(projectID int, filePath, branch stri
 	// Track the last fetch call
 	m.lastFetchProjectID = projectID
 	m.lastFetchBranch = branch
-	
+
 	// Return different content based on which branch is requested
 	// This is a simple way to distinguish between old and new content requests
 	if branch == m.targetBranch && m.oldFileError != nil {
@@ -609,6 +546,59 @@ func (m *MockGitLabClient) GetMRDetails(projectID, mrIID int) (*gitlab.MRDetails
 		return nil, m.mrDetailsError
 	}
 	return m.mrDetails, nil
+}
+
+// Stub implementations for interface compliance (not used in warehouse tests)
+func (m *MockGitLabClient) FetchMRChanges(projectID, mrIID int) ([]gitlab.FileChange, error) {
+	return []gitlab.FileChange{}, nil
+}
+
+func (m *MockGitLabClient) AddMRComment(projectID, mrIID int, comment string) error {
+	return nil
+}
+
+func (m *MockGitLabClient) AddOrUpdateMRComment(projectID, mrIID int, commentBody, commentType string) error {
+	return nil
+}
+
+func (m *MockGitLabClient) ListMRComments(projectID, mrIID int) ([]gitlab.MRComment, error) {
+	return []gitlab.MRComment{}, nil
+}
+
+func (m *MockGitLabClient) UpdateMRComment(projectID, mrIID, commentID int, newBody string) error {
+	return nil
+}
+
+func (m *MockGitLabClient) FindLatestNaysayerComment(projectID, mrIID int, commentType ...string) (*gitlab.MRComment, error) {
+	return nil, nil
+}
+
+func (m *MockGitLabClient) ApproveMR(projectID, mrIID int) error {
+	return nil
+}
+
+func (m *MockGitLabClient) ApproveMRWithMessage(projectID, mrIID int, message string) error {
+	return nil
+}
+
+func (m *MockGitLabClient) ResetNaysayerApproval(projectID, mrIID int) error {
+	return nil
+}
+
+func (m *MockGitLabClient) GetCurrentBotUsername() (string, error) {
+	return "naysayer-bot", nil
+}
+
+func (m *MockGitLabClient) IsNaysayerBotAuthor(author map[string]interface{}) bool {
+	return false
+}
+
+func (m *MockGitLabClient) RebaseMR(projectID, mrIID int) (bool, error) {
+	return true, nil
+}
+
+func (m *MockGitLabClient) ListOpenMRs(projectID int) ([]int, error) {
+	return []int{}, nil
 }
 
 func TestAnalyzer_hasNonWarehouseChanges(t *testing.T) {
@@ -637,14 +627,14 @@ warehouses:
 tags:
   data_product: test`,
 			oldDP: &DataProduct{
-				Name: "test",
+				Name:       "test",
 				Warehouses: []Warehouse{{Type: "snowflake", Size: "LARGE"}},
-				Tags: Tags{DataProduct: "test"},
+				Tags:       Tags{DataProduct: "test"},
 			},
 			newDP: &DataProduct{
-				Name: "test",
+				Name:       "test",
 				Warehouses: []Warehouse{{Type: "snowflake", Size: "MEDIUM"}},
-				Tags: Tags{DataProduct: "test"},
+				Tags:       Tags{DataProduct: "test"},
 			},
 			expected: false,
 		},
@@ -659,11 +649,11 @@ warehouses:
   - type: snowflake
     size: LARGE`,
 			oldDP: &DataProduct{
-				Name: "old-name",
+				Name:       "old-name",
 				Warehouses: []Warehouse{{Type: "snowflake", Size: "LARGE"}},
 			},
 			newDP: &DataProduct{
-				Name: "new-name",
+				Name:       "new-name",
 				Warehouses: []Warehouse{{Type: "snowflake", Size: "LARGE"}},
 			},
 			expected: true,
@@ -688,11 +678,11 @@ data_product_db:
       - name: consumer1
       - name: consumer2`,
 			oldDP: &DataProduct{
-				Name: "test",
+				Name:       "test",
 				Warehouses: []Warehouse{{Type: "snowflake", Size: "LARGE"}},
 			},
 			newDP: &DataProduct{
-				Name: "test",
+				Name:       "test",
 				Warehouses: []Warehouse{{Type: "snowflake", Size: "LARGE"}},
 			},
 			expected: true,

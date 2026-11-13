@@ -37,20 +37,27 @@ func (m *MockRuleManagerForApproval) EvaluateAll(ctx *shared.MRContext) *shared.
 			Summary: "✅ Test approval",
 			Details: "Mock rule evaluation for testing approval workflow",
 		},
-		RuleResults: []shared.RuleResult{
-			{
-				RuleName: "warehouse_rule",
-				Decision: shared.Decision{
-					Type:   shared.Approve,
-					Reason: "Mock warehouse approval",
+		FileValidations: map[string]*shared.FileValidationSummary{
+			"dataproducts/agg/test/prod/product.yaml": {
+				FilePath:     "dataproducts/agg/test/prod/product.yaml",
+				TotalLines:   50,
+				CoveredLines: []shared.LineRange{{StartLine: 1, EndLine: 50}},
+				RuleResults: []shared.LineValidationResult{
+					{
+						RuleName:   "warehouse_rule",
+						Decision:   shared.Approve,
+						Reason:     "Mock warehouse approval",
+						LineRanges: []shared.LineRange{{StartLine: 1, EndLine: 50}},
+					},
 				},
-				Metadata: map[string]any{
-					"analyzed_files":    []string{"dataproducts/agg/test/prod/product.yaml"},
-					"warehouse_changes": []interface{}{"LARGE -> MEDIUM"},
-				},
+				FileDecision: shared.Approve,
 			},
 		},
-		ExecutionTime: time.Millisecond * 100,
+		ExecutionTime:  time.Millisecond * 100,
+		TotalFiles:     1,
+		ApprovedFiles:  1,
+		ReviewFiles:    0,
+		UncoveredFiles: 0,
 	}
 }
 
@@ -63,17 +70,17 @@ func TestHandleApprovalWithComments_Success(t *testing.T) {
 			commentReceived = true
 			assert.Equal(t, "POST", r.Method)
 			assert.Contains(t, r.URL.Path, "/api/v4/projects/123/merge_requests/456/notes")
-			
+
 			w.WriteHeader(201)
-			w.Write([]byte(`{"id": 789, "body": "comment added"}`))
+			_, _ = w.Write([]byte(`{"id": 789, "body": "comment added"}`))
 		} else if strings.Contains(r.URL.Path, "/approve") {
 			// Approval API call
 			approvalReceived = true
 			assert.Equal(t, "POST", r.Method)
 			assert.Contains(t, r.URL.Path, "/api/v4/projects/123/merge_requests/456/approve")
-			
+
 			w.WriteHeader(201)
-			w.Write([]byte(`{"id": 456, "approved": true}`))
+			_, _ = w.Write([]byte(`{"id": 456, "approved": true}`))
 		} else {
 			w.WriteHeader(404)
 		}
@@ -101,20 +108,12 @@ func TestHandleApprovalWithComments_Success(t *testing.T) {
 						Type:   shared.Approve,
 						Reason: "Warehouse decreases detected",
 					},
-					RuleResults: []shared.RuleResult{
-						{
-							RuleName: "warehouse_rule",
-							Decision: shared.Decision{
-								Type:   shared.Approve,
-								Reason: "Safe warehouse changes",
-							},
-							Metadata: map[string]any{
-								"analyzed_files":    []string{"test/product.yaml"},
-								"warehouse_changes": []interface{}{"LARGE->MEDIUM"},
-							},
-						},
-					},
-					ExecutionTime: time.Millisecond * 150,
+					FileValidations: map[string]*shared.FileValidationSummary{},
+					ExecutionTime:   time.Millisecond * 150,
+					TotalFiles:      0,
+					ApprovedFiles:   0,
+					ReviewFiles:     0,
+					UncoveredFiles:  0,
 				}
 			},
 		},
@@ -126,20 +125,27 @@ func TestHandleApprovalWithComments_Success(t *testing.T) {
 			Type:   shared.Approve,
 			Reason: "Warehouse decreases detected",
 		},
-		RuleResults: []shared.RuleResult{
-			{
-				RuleName: "warehouse_rule",
-				Decision: shared.Decision{
-					Type:   shared.Approve,
-					Reason: "Safe warehouse changes",
+		FileValidations: map[string]*shared.FileValidationSummary{
+			"test/product.yaml": {
+				FilePath:     "test/product.yaml",
+				TotalLines:   30,
+				CoveredLines: []shared.LineRange{{StartLine: 1, EndLine: 30}},
+				RuleResults: []shared.LineValidationResult{
+					{
+						RuleName:   "warehouse_rule",
+						Decision:   shared.Approve,
+						Reason:     "Safe warehouse changes",
+						LineRanges: []shared.LineRange{{StartLine: 1, EndLine: 30}},
+					},
 				},
-				Metadata: map[string]any{
-					"analyzed_files":    []string{"test/product.yaml"},
-					"warehouse_changes": []interface{}{"LARGE->MEDIUM"},
-				},
+				FileDecision: shared.Approve,
 			},
 		},
-		ExecutionTime: time.Millisecond * 150,
+		ExecutionTime:  time.Millisecond * 150,
+		TotalFiles:     1,
+		ApprovedFiles:  1,
+		ReviewFiles:    0,
+		UncoveredFiles: 0,
 	}
 
 	mrInfo := &gitlab.MRInfo{
@@ -147,6 +153,7 @@ func TestHandleApprovalWithComments_Success(t *testing.T) {
 		MRIID:     456,
 		Author:    "testuser",
 		Title:     "Test warehouse decrease",
+		State:     "opened",
 	}
 
 	err := handler.handleApprovalWithComments(result, mrInfo)
@@ -155,7 +162,6 @@ func TestHandleApprovalWithComments_Success(t *testing.T) {
 	assert.True(t, commentReceived, "Should have posted comment to GitLab")
 	assert.True(t, approvalReceived, "Should have approved MR in GitLab")
 }
-
 
 func TestHandleApprovalWithComments_CommentsDisabled(t *testing.T) {
 	// Create test GitLab server that should only receive approval call (no comment)
@@ -167,7 +173,7 @@ func TestHandleApprovalWithComments_CommentsDisabled(t *testing.T) {
 		} else if strings.Contains(r.URL.Path, "/approve") {
 			approvalReceived = true
 			w.WriteHeader(201)
-			w.Write([]byte(`{"approved": true}`))
+			_, _ = w.Write([]byte(`{"approved": true}`))
 		}
 	}))
 	defer gitlabServer.Close()
@@ -192,8 +198,12 @@ func TestHandleApprovalWithComments_CommentsDisabled(t *testing.T) {
 			Type:   shared.Approve,
 			Reason: "Test approval",
 		},
-		RuleResults: []shared.RuleResult{},
-		ExecutionTime: time.Millisecond * 100,
+		FileValidations: map[string]*shared.FileValidationSummary{},
+		TotalFiles:      0,
+		ApprovedFiles:   0,
+		ReviewFiles:     0,
+		UncoveredFiles:  0,
+		ExecutionTime:   time.Millisecond * 100,
 	}
 
 	mrInfo := &gitlab.MRInfo{
@@ -201,6 +211,7 @@ func TestHandleApprovalWithComments_CommentsDisabled(t *testing.T) {
 		MRIID:     456,
 		Author:    "testuser",
 		Title:     "Test MR",
+		State:     "opened",
 	}
 
 	err := handler.handleApprovalWithComments(result, mrInfo)
@@ -217,12 +228,12 @@ func TestHandleApprovalWithComments_CommentFailsContinues(t *testing.T) {
 		if strings.Contains(r.URL.Path, "/notes") {
 			// Comment fails
 			w.WriteHeader(401)
-			w.Write([]byte(`{"message": "Unauthorized"}`))
+			_, _ = w.Write([]byte(`{"message": "Unauthorized"}`))
 		} else if strings.Contains(r.URL.Path, "/approve") {
 			// Approval succeeds
 			approvalReceived = true
 			w.WriteHeader(201)
-			w.Write([]byte(`{"approved": true}`))
+			_, _ = w.Write([]byte(`{"approved": true}`))
 		}
 	}))
 	defer gitlabServer.Close()
@@ -247,8 +258,12 @@ func TestHandleApprovalWithComments_CommentFailsContinues(t *testing.T) {
 			Type:   shared.Approve,
 			Reason: "Test approval",
 		},
-		RuleResults: []shared.RuleResult{},
-		ExecutionTime: time.Millisecond * 100,
+		FileValidations: map[string]*shared.FileValidationSummary{},
+		TotalFiles:      0,
+		ApprovedFiles:   0,
+		ReviewFiles:     0,
+		UncoveredFiles:  0,
+		ExecutionTime:   time.Millisecond * 100,
 	}
 
 	mrInfo := &gitlab.MRInfo{
@@ -256,6 +271,7 @@ func TestHandleApprovalWithComments_CommentFailsContinues(t *testing.T) {
 		MRIID:     456,
 		Author:    "testuser",
 		Title:     "Test MR",
+		State:     "opened",
 	}
 
 	err := handler.handleApprovalWithComments(result, mrInfo)
@@ -274,11 +290,11 @@ func TestHandleApprovalWithComments_ApprovalFallback(t *testing.T) {
 			if callCount == 1 {
 				// First approval call (with message) fails
 				w.WriteHeader(400)
-				w.Write([]byte(`{"message": "Bad Request"}`))
+				_, _ = w.Write([]byte(`{"message": "Bad Request"}`))
 			} else {
 				// Second approval call (simple) succeeds
 				w.WriteHeader(201)
-				w.Write([]byte(`{"approved": true}`))
+				_, _ = w.Write([]byte(`{"approved": true}`))
 			}
 		}
 	}))
@@ -304,8 +320,12 @@ func TestHandleApprovalWithComments_ApprovalFallback(t *testing.T) {
 			Type:   shared.Approve,
 			Reason: "Test approval",
 		},
-		RuleResults: []shared.RuleResult{},
-		ExecutionTime: time.Millisecond * 100,
+		FileValidations: map[string]*shared.FileValidationSummary{},
+		TotalFiles:      0,
+		ApprovedFiles:   0,
+		ReviewFiles:     0,
+		UncoveredFiles:  0,
+		ExecutionTime:   time.Millisecond * 100,
 	}
 
 	mrInfo := &gitlab.MRInfo{
@@ -313,6 +333,7 @@ func TestHandleApprovalWithComments_ApprovalFallback(t *testing.T) {
 		MRIID:     456,
 		Author:    "testuser",
 		Title:     "Test MR",
+		State:     "opened",
 	}
 
 	err := handler.handleApprovalWithComments(result, mrInfo)
@@ -321,12 +342,17 @@ func TestHandleApprovalWithComments_ApprovalFallback(t *testing.T) {
 	assert.Equal(t, 2, callCount, "Should have made 2 approval attempts (with message, then fallback)")
 }
 
-func TestHandleApprovalWithComments_BothApprovalsFail(t *testing.T) {
-	// Create test GitLab server that fails both approval attempts
+func TestHandleApprovalWithComments_401_BotAlreadyApproved(t *testing.T) {
+	// GitLab returns 401 on re-approval race. If bot is in approved_by list, treat as success.
 	gitlabServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "/approve") {
+		switch {
+		case strings.Contains(r.URL.Path, "/approve"):
 			w.WriteHeader(401)
-			w.Write([]byte(`{"message": "Unauthorized"}`))
+			_, _ = w.Write([]byte(`{"message": "Unauthorized"}`))
+		case r.URL.Path == "/api/v4/user":
+			_, _ = w.Write([]byte(`{"username": "naysayer-bot"}`))
+		case strings.Contains(r.URL.Path, "/approvals"):
+			_, _ = w.Write([]byte(`{"approved_by": [{"user": {"username": "naysayer-bot"}}]}`))
 		}
 	}))
 	defer gitlabServer.Close()
@@ -334,7 +360,7 @@ func TestHandleApprovalWithComments_BothApprovalsFail(t *testing.T) {
 	cfg := &config.Config{
 		GitLab: config.GitLabConfig{
 			BaseURL: gitlabServer.URL,
-			Token:   "invalid-token",
+			Token:   "test-token",
 		},
 		Comments: config.CommentsConfig{
 			EnableMRComments: false,
@@ -351,8 +377,12 @@ func TestHandleApprovalWithComments_BothApprovalsFail(t *testing.T) {
 			Type:   shared.Approve,
 			Reason: "Test approval",
 		},
-		RuleResults: []shared.RuleResult{},
-		ExecutionTime: time.Millisecond * 100,
+		FileValidations: map[string]*shared.FileValidationSummary{},
+		TotalFiles:      0,
+		ApprovedFiles:   0,
+		ReviewFiles:     0,
+		UncoveredFiles:  0,
+		ExecutionTime:   time.Millisecond * 100,
 	}
 
 	mrInfo := &gitlab.MRInfo{
@@ -360,41 +390,97 @@ func TestHandleApprovalWithComments_BothApprovalsFail(t *testing.T) {
 		MRIID:     456,
 		Author:    "testuser",
 		Title:     "Test MR",
+		State:     "opened",
 	}
 
 	err := handler.handleApprovalWithComments(result, mrInfo)
+	assert.NoError(t, err)
+}
 
+func TestHandleApprovalWithComments_401_GenuinePermissionFailure(t *testing.T) {
+	// 401 when bot is NOT in approved_by list = real permission error, should fail.
+	gitlabServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/approve"):
+			w.WriteHeader(401)
+			_, _ = w.Write([]byte(`{"message": "Unauthorized"}`))
+		case r.URL.Path == "/api/v4/user":
+			_, _ = w.Write([]byte(`{"username": "naysayer-bot"}`))
+		case strings.Contains(r.URL.Path, "/approvals"):
+			_, _ = w.Write([]byte(`{"approved_by": []}`))
+		}
+	}))
+	defer gitlabServer.Close()
+
+	cfg := &config.Config{
+		GitLab: config.GitLabConfig{
+			BaseURL: gitlabServer.URL,
+			Token:   "test-token",
+		},
+		Comments: config.CommentsConfig{
+			EnableMRComments: false,
+		},
+	}
+
+	handler := &DataProductConfigMrReviewHandler{
+		gitlabClient: gitlab.NewClientWithConfig(cfg),
+		config:       cfg,
+	}
+
+	result := &shared.RuleEvaluation{
+		FinalDecision: shared.Decision{
+			Type:   shared.Approve,
+			Reason: "Test approval",
+		},
+		FileValidations: map[string]*shared.FileValidationSummary{},
+		TotalFiles:      0,
+		ApprovedFiles:   0,
+		ReviewFiles:     0,
+		UncoveredFiles:  0,
+		ExecutionTime:   time.Millisecond * 100,
+	}
+
+	mrInfo := &gitlab.MRInfo{
+		ProjectID: 123,
+		MRIID:     456,
+		Author:    "testuser",
+		Title:     "Test MR",
+		State:     "opened",
+	}
+
+	err := handler.handleApprovalWithComments(result, mrInfo)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to approve MR (both with message and simple)")
+	assert.Contains(t, err.Error(), "failed to approve MR")
 }
 
 func TestWebhookHandler_FullApprovalWorkflow(t *testing.T) {
 	// Integration test for the full approval workflow
-	
+
 	// Create mock GitLab server for changes API (to avoid manual review due to API failure)
 	changesServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/changes") {
 			// Return mock changes that should trigger approval
 			w.WriteHeader(200)
-			w.Write([]byte(`{
+			_, _ = w.Write([]byte(`{
 				"changes": [
 					{
 						"old_path": "dataproducts/agg/test/prod/product.yaml",
 						"new_path": "dataproducts/agg/test/prod/product.yaml",
 						"new_file": false,
 						"renamed_file": false,
-						"deleted_file": false
+						"deleted_file": false,
+						"diff": "@@ -10,7 +10,7 @@\n warehouses:\n-  - name: old\n+  - name: new"
 					}
 				]
 			}`))
 		} else if strings.Contains(r.URL.Path, "/notes") {
 			// Mock comment creation
 			w.WriteHeader(201)
-			w.Write([]byte(`{"id": 123}`))
+			_, _ = w.Write([]byte(`{"id": 123}`))
 		} else if strings.Contains(r.URL.Path, "/approve") {
 			// Mock approval
 			w.WriteHeader(201)
-			w.Write([]byte(`{"approved": true}`))
+			_, _ = w.Write([]byte(`{"approved": true}`))
 		}
 	}))
 	defer changesServer.Close()
@@ -422,20 +508,27 @@ func TestWebhookHandler_FullApprovalWorkflow(t *testing.T) {
 						Type:   shared.Approve,
 						Reason: "Safe warehouse changes detected",
 					},
-					RuleResults: []shared.RuleResult{
-						{
-							RuleName: "warehouse_rule",
-							Decision: shared.Decision{
-								Type:   shared.Approve,
-								Reason: "All warehouse changes are decreases",
+					FileValidations: map[string]*shared.FileValidationSummary{
+						"dataproducts/agg/test/prod/product.yaml": {
+							FilePath:     "dataproducts/agg/test/prod/product.yaml",
+							TotalLines:   50,
+							CoveredLines: []shared.LineRange{{StartLine: 1, EndLine: 50}},
+							RuleResults: []shared.LineValidationResult{
+								{
+									RuleName:   "warehouse_rule",
+									Decision:   shared.Approve,
+									Reason:     "All warehouse changes are decreases",
+									LineRanges: []shared.LineRange{{StartLine: 1, EndLine: 50}},
+								},
 							},
-							Metadata: map[string]any{
-								"analyzed_files":    []string{"dataproducts/agg/test/prod/product.yaml"},
-								"warehouse_changes": []interface{}{"LARGE->MEDIUM"},
-							},
+							FileDecision: shared.Approve,
 						},
 					},
-					ExecutionTime: time.Millisecond * 200,
+					ExecutionTime:  time.Millisecond * 200,
+					TotalFiles:     1,
+					ApprovedFiles:  1,
+					ReviewFiles:    0,
+					UncoveredFiles: 0,
 				}
 			},
 		},
@@ -452,6 +545,7 @@ func TestWebhookHandler_FullApprovalWorkflow(t *testing.T) {
 		"object_attributes": map[string]interface{}{
 			"iid":   123,
 			"title": "Test warehouse decrease",
+			"state": "opened",
 		},
 		"project": map[string]interface{}{
 			"id": 456,
@@ -471,16 +565,16 @@ func TestWebhookHandler_FullApprovalWorkflow(t *testing.T) {
 
 	// Parse response
 	body := new(bytes.Buffer)
-	body.ReadFrom(resp.Body)
+	_, _ = body.ReadFrom(resp.Body)
 	var response map[string]interface{}
-	json.Unmarshal(body.Bytes(), &response)
+	_ = json.Unmarshal(body.Bytes(), &response)
 
 	// Verify approval workflow executed
 	assert.Equal(t, "processed", response["webhook_response"])
 	assert.Equal(t, true, response["mr_approved"])
 	assert.Equal(t, float64(456), response["project_id"])
 	assert.Equal(t, float64(123), response["mr_iid"])
-	
+
 	decision := response["decision"].(map[string]interface{})
 	assert.Equal(t, "approve", decision["type"])
 }

@@ -1,0 +1,18 @@
+<!-- naysayer-comment-id: manual-review -->
+⚠️ **Manual review required**
+
+**Why manual review is needed:**
+One or more files require manual review
+
+<details>
+<summary>📋 <strong>Analysis Details</strong> (click to expand)</summary>
+
+**What was checked:**
+• ✅ Access policy validated across 2 files
+• ✅ AI status validated across 2 files
+• ✅ Consumer access changes in dev environment - data product owner approval sufficient (no TOC approval required)
+• ✅ Auto-approved: Product metadata changes are safe
+• 🚫 Manual review required: New data product being promoted to preprod environment requires TOC (Technical Oversight Committee) approval before deployment
+• 🚫 Warehouse size increase detected: New service_account warehouse: XSMALL, New user warehouse: XSMALL
+
+</details>

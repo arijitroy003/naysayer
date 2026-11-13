@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -12,10 +13,62 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/recover"
+	"github.com/stretchr/testify/assert"
+
 	"github.com/redhat-data-and-ai/naysayer/internal/config"
 	"github.com/redhat-data-and-ai/naysayer/internal/webhook"
-	"github.com/stretchr/testify/assert"
 )
+
+func setupTestRulesFile() {
+	tempRulesContent := `enabled: true
+
+files:
+  - name: "product_configs"
+    path: "**/"
+    filename: "product.{yaml,yml}"
+    parser_type: yaml
+    enabled: true
+    sections:
+      - name: warehouses
+        yaml_path: warehouses
+        required: true
+        rule_configs:
+          - name: warehouse_rule
+            enabled: true
+        auto_approve: false
+  - name: "documentation_files"
+    path: "**/"
+    filename: "*.md"
+    parser_type: yaml
+    enabled: true
+    sections:
+      - name: full_file
+        yaml_path: .
+        required: true
+        rule_configs:
+          - name: metadata_rule
+            enabled: true
+        auto_approve: true`
+
+	err := os.WriteFile("rules.yaml", []byte(tempRulesContent), 0644)
+	if err != nil {
+		panic("Failed to create test rules file: " + err.Error())
+	}
+}
+
+func cleanupTestRulesFile() {
+	_ = os.Remove("rules.yaml")
+}
+
+// createTestApplicationWithCleanup creates a test application and returns a cleanup function
+func createTestApplicationWithCleanup(t *testing.T) (*fiber.App, func()) {
+	setupTestRulesFile()
+	cleanup := func() {
+		cleanupTestRulesFile()
+	}
+	t.Cleanup(cleanup) // Automatically cleanup when test ends
+	return createTestApplication(), cleanup
+}
 
 // createTestApplication creates a Fiber application with the same configuration as main
 func createTestApplication() *fiber.App {
@@ -25,9 +78,7 @@ func createTestApplication() *fiber.App {
 			BaseURL: "https://gitlab.example.com",
 			Token:   "test-token",
 		},
-		Webhook: config.WebhookConfig{
-
-		},
+		Webhook: config.WebhookConfig{},
 		Server: config.ServerConfig{
 			Port: "8080",
 		},
@@ -36,6 +87,8 @@ func createTestApplication() *fiber.App {
 	// Create handlers
 	webhookHandler := webhook.NewDataProductConfigMrReviewHandler(cfg)
 	healthHandler := webhook.NewHealthHandler(cfg)
+	autoRebaseHandler := webhook.NewAutoRebaseHandler(cfg)
+	staleMRCleanupHandler := webhook.NewStaleMRCleanupHandler(cfg)
 
 	// Create Fiber app with same config as main
 	app := fiber.New(fiber.Config{
@@ -58,16 +111,16 @@ func createTestApplication() *fiber.App {
 	app.Get("/health", healthHandler.HandleHealth)
 	app.Get("/ready", healthHandler.HandleReady)
 
-
-
 	// Webhook routes (same as main)
 	app.Post("/dataverse-product-config-review", webhookHandler.HandleWebhook)
+	app.Post("/auto-rebase", autoRebaseHandler.HandleWebhook)
+	app.Post("/stale-mr-cleanup", staleMRCleanupHandler.HandleWebhook)
 
 	return app
 }
 
 func TestApplication_HealthEndpoints(t *testing.T) {
-	app := createTestApplication()
+	app, _ := createTestApplicationWithCleanup(t)
 
 	tests := []struct {
 		name         string
@@ -109,10 +162,8 @@ func TestApplication_HealthEndpoints(t *testing.T) {
 	}
 }
 
-
-
 func TestApplication_WebhookEndpoint(t *testing.T) {
-	app := createTestApplication()
+	app, _ := createTestApplicationWithCleanup(t)
 
 	tests := []struct {
 		name         string
@@ -172,7 +223,7 @@ func TestApplication_WebhookEndpoint(t *testing.T) {
 }
 
 func TestApplication_UnknownRoutes(t *testing.T) {
-	app := createTestApplication()
+	app, _ := createTestApplicationWithCleanup(t)
 
 	tests := []struct {
 		name         string
@@ -212,7 +263,7 @@ func TestApplication_UnknownRoutes(t *testing.T) {
 }
 
 func TestApplication_MethodNotAllowed(t *testing.T) {
-	app := createTestApplication()
+	app, _ := createTestApplicationWithCleanup(t)
 
 	tests := []struct {
 		name         string
@@ -252,7 +303,7 @@ func TestApplication_MethodNotAllowed(t *testing.T) {
 }
 
 func TestApplication_CORS_Headers(t *testing.T) {
-	app := createTestApplication()
+	app, _ := createTestApplicationWithCleanup(t)
 
 	// Test CORS preflight request
 	req := httptest.NewRequest("OPTIONS", "/health", nil)
@@ -267,7 +318,7 @@ func TestApplication_CORS_Headers(t *testing.T) {
 }
 
 func TestApplication_ErrorHandling(t *testing.T) {
-	app := createTestApplication()
+	app, _ := createTestApplicationWithCleanup(t)
 
 	// Test error handling with a simple invalid route
 	req := httptest.NewRequest("GET", "/invalid-route", nil)
@@ -281,12 +332,12 @@ func TestApplication_ErrorHandling(t *testing.T) {
 	// Parse response to make sure error handler is working
 	body, _ := io.ReadAll(resp.Body)
 	var response map[string]interface{}
-	json.Unmarshal(body, &response)
+	_ = json.Unmarshal(body, &response)
 	assert.Equal(t, "Internal server error", response["error"])
 }
 
 func TestApplication_HealthCheck_Integration(t *testing.T) {
-	app := createTestApplication()
+	app, _ := createTestApplicationWithCleanup(t)
 
 	// Test health endpoint response structure
 	req := httptest.NewRequest("GET", "/health", nil)
@@ -297,7 +348,7 @@ func TestApplication_HealthCheck_Integration(t *testing.T) {
 
 	body, _ := io.ReadAll(resp.Body)
 	var health map[string]interface{}
-	json.Unmarshal(body, &health)
+	_ = json.Unmarshal(body, &health)
 
 	// Verify health response has expected fields
 	assert.Equal(t, "healthy", health["status"])
@@ -307,16 +358,17 @@ func TestApplication_HealthCheck_Integration(t *testing.T) {
 	assert.NotNil(t, health["timestamp"])
 }
 
-
-
 func TestApplication_RouteConfiguration(t *testing.T) {
-	app := createTestApplication()
+	app, _ := createTestApplicationWithCleanup(t)
 
 	// Test that all routes from main.go are properly configured
+	// Note: Routes that make external API calls may return 500 in tests (route exists, but API fails)
 	expectedRoutes := map[string]string{
 		"GET:/health":                           "200",
 		"GET:/ready":                            "200",
-		"POST:/dataverse-product-config-review": "200", // Will return 200 even with API failure
+		"POST:/dataverse-product-config-review": "200",     // Will return 200 even with API failure
+		"POST:/auto-rebase":                     "200|500", // Route exists (500 = API failure, not 404 = route missing)
+		"POST:/stale-mr-cleanup":                "200|500", // Route exists (500 = API failure, not 404 = route missing)
 	}
 
 	for route, expectedStatus := range expectedRoutes {
@@ -327,8 +379,19 @@ func TestApplication_RouteConfiguration(t *testing.T) {
 		t.Run(route, func(t *testing.T) {
 			var req *http.Request
 			if method == "POST" {
-				// For POST requests, provide a minimal valid payload
-				req = httptest.NewRequest(method, path, strings.NewReader(`{"object_kind":"merge_request","object_attributes":{"iid":123},"project":{"id":456}}`))
+				// For POST requests, provide appropriate payload based on endpoint
+				var payload string
+				switch path {
+				case "/dataverse-product-config-review":
+					payload = `{"object_kind":"merge_request","object_attributes":{"iid":123},"project":{"id":456}}`
+				case "/auto-rebase":
+					payload = `{"object_kind":"push","ref":"refs/heads/main","project":{"id":456}}`
+				case "/stale-mr-cleanup":
+					payload = `{"project_id":456}`
+				default:
+					payload = `{}`
+				}
+				req = httptest.NewRequest(method, path, strings.NewReader(payload))
 				req.Header.Set("Content-Type", "application/json")
 			} else {
 				req = httptest.NewRequest(method, path, nil)
@@ -337,16 +400,20 @@ func TestApplication_RouteConfiguration(t *testing.T) {
 			resp, err := app.Test(req)
 			assert.NoError(t, err)
 
-			// Convert expected status to int
-			if expectedStatus == "200" {
-				assert.Equal(t, 200, resp.StatusCode)
+			// Check that route exists (not 404) and matches expected status
+			// For routes with "200|500", accept either (500 = route exists but API failed)
+			switch expectedStatus {
+			case "200":
+				assert.Equal(t, 200, resp.StatusCode, "Route should return 200")
+			case "200|500":
+				assert.Contains(t, []int{200, 500}, resp.StatusCode, "Route should exist (200 or 500, not 404)")
 			}
 		})
 	}
 }
 
 func TestApplication_Middleware_Integration(t *testing.T) {
-	app := createTestApplication()
+	app, _ := createTestApplicationWithCleanup(t)
 
 	// Test that middleware is working
 	req := httptest.NewRequest("GET", "/health", nil)
@@ -358,6 +425,6 @@ func TestApplication_Middleware_Integration(t *testing.T) {
 	// The response should be successful, indicating middleware didn't interfere
 	body, _ := io.ReadAll(resp.Body)
 	var health map[string]interface{}
-	json.Unmarshal(body, &health)
+	_ = json.Unmarshal(body, &health)
 	assert.Equal(t, "healthy", health["status"])
 }

@@ -1,3 +1,4 @@
+// Package logging provides a logging interface for the application.
 package logging
 
 import (
@@ -31,7 +32,7 @@ func NewLogger(level LogLevel, component string) *Logger {
 	config.Level = zap.NewAtomicLevelAt(logLevelToZap(level))
 	config.Development = false
 	config.Encoding = "json"
-	
+
 	// Set initial fields
 	config.InitialFields = map[string]interface{}{
 		"component": component,
@@ -110,7 +111,7 @@ func (l *Logger) Error(message string, args ...interface{}) {
 	}
 }
 
-// MR-specific logging helpers for better traceability
+// MRInfo logs MR-specific info messages
 func (l *Logger) MRInfo(mrID int, message string, fields ...zap.Field) {
 	allFields := append([]zap.Field{zap.Int("mr_id", mrID)}, fields...)
 	l.zap.Info(message, allFields...)
@@ -131,7 +132,7 @@ func (l *Logger) MRWarn(mrID int, message string, fields ...zap.Field) {
 
 // Sync flushes any buffered log entries
 func (l *Logger) Sync() {
-	l.zap.Sync()
+	_ = l.zap.Sync()
 }
 
 // Global logger instance
@@ -143,7 +144,7 @@ func InitLogger(level string, component string) {
 	defaultLogger = NewLogger(logLevel, component)
 }
 
-// Global logging functions (only the ones actually used)
+// Info logs messages (only the ones actually used)
 func Info(message string, args ...interface{}) {
 	if defaultLogger != nil {
 		defaultLogger.Info(message, args...)
@@ -162,7 +163,7 @@ func Error(message string, args ...interface{}) {
 	}
 }
 
-// MR-specific global helpers
+// MRInfo logs MR-specific info messages
 func MRInfo(mrID int, message string, fields ...zap.Field) {
 	if defaultLogger != nil {
 		defaultLogger.MRInfo(mrID, message, fields...)
@@ -195,4 +196,4 @@ func init() {
 		}
 		InitLogger(level, "NAYSAYER")
 	}
-} 
+}

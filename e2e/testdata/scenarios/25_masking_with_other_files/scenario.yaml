@@ -1,0 +1,16 @@
+name: "Masking files with other auto-approved files"
+description: "Valid masking policy files are auto-approved along with other auto-approved files"
+
+expected:
+  decision: Approve
+  reason: "All files passed validation"
+  approved: true
+
+  comment_contains:
+    - "✅ **Auto-approved**"
+
+mr_metadata:
+  title: "Update masking, sourcebinding and product config"
+  author: "testuser"
+  source_branch: "feature/multi-file-update"
+  target_branch: "main"

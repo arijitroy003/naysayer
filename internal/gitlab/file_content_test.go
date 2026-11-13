@@ -43,7 +43,7 @@ tags:
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+		_ = json.NewEncoder(w).Encode(response)
 	}))
 	defer server.Close()
 
@@ -84,7 +84,7 @@ warehouses:
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+		_ = json.NewEncoder(w).Encode(response)
 	}))
 	defer server.Close()
 
@@ -112,7 +112,7 @@ func TestClient_FetchFileContent_InvalidBase64(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+		_ = json.NewEncoder(w).Encode(response)
 	}))
 	defer server.Close()
 
@@ -132,7 +132,7 @@ func TestClient_FetchFileContent_InvalidBase64(t *testing.T) {
 func TestClient_FetchFileContent_FileNotFound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(404)
-		w.Write([]byte(`{"message": "404 File Not Found"}`))
+		_, _ = w.Write([]byte(`{"message": "404 File Not Found"}`))
 	}))
 	defer server.Close()
 
@@ -160,19 +160,19 @@ func TestClient_FetchFileContent_HTTPErrors(t *testing.T) {
 			name:          "401 Unauthorized",
 			statusCode:    401,
 			responseBody:  `{"message": "401 Unauthorized"}`,
-			expectedError: "GitLab API error 401",
+			expectedError: "gitlab API error 401",
 		},
 		{
 			name:          "403 Forbidden",
 			statusCode:    403,
 			responseBody:  `{"message": "403 Project access forbidden"}`,
-			expectedError: "GitLab API error 403",
+			expectedError: "gitlab API error 403",
 		},
 		{
 			name:          "500 Internal Server Error",
 			statusCode:    500,
 			responseBody:  `{"message": "Internal Server Error"}`,
-			expectedError: "GitLab API error 500",
+			expectedError: "gitlab API error 500",
 		},
 	}
 
@@ -180,7 +180,7 @@ func TestClient_FetchFileContent_HTTPErrors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(tt.statusCode)
-				w.Write([]byte(tt.responseBody))
+				_, _ = w.Write([]byte(tt.responseBody))
 			}))
 			defer server.Close()
 
@@ -212,7 +212,7 @@ func TestClient_FetchFileContent_URLEncoding(t *testing.T) {
 			Encoding: "text",
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+		_ = json.NewEncoder(w).Encode(response)
 	}))
 	defer server.Close()
 
@@ -245,7 +245,7 @@ func TestClient_GetMRTargetBranch_Success(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+		_ = json.NewEncoder(w).Encode(response)
 	}))
 	defer server.Close()
 
@@ -264,7 +264,7 @@ func TestClient_GetMRTargetBranch_Success(t *testing.T) {
 func TestClient_GetMRTargetBranch_HTTPError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(404)
-		w.Write([]byte(`{"message": "404 Merge Request Not Found"}`))
+		_, _ = w.Write([]byte(`{"message": "404 Merge Request Not Found"}`))
 	}))
 	defer server.Close()
 
@@ -278,13 +278,13 @@ func TestClient_GetMRTargetBranch_HTTPError(t *testing.T) {
 
 	assert.Error(t, err)
 	assert.Empty(t, targetBranch)
-	assert.Contains(t, err.Error(), "GitLab API error 404")
+	assert.Contains(t, err.Error(), "gitlab API error 404")
 }
 
 func TestClient_GetMRTargetBranch_InvalidJSON(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"invalid": json content}`))
+		_, _ = w.Write([]byte(`{"invalid": json content}`))
 	}))
 	defer server.Close()
 
@@ -317,7 +317,7 @@ func TestClient_GetMRDetails_Success(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+		_ = json.NewEncoder(w).Encode(response)
 	}))
 	defer server.Close()
 
@@ -342,7 +342,7 @@ func TestClient_GetMRDetails_Success(t *testing.T) {
 func TestClient_GetMRDetails_HTTPError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(403)
-		w.Write([]byte(`{"message": "403 Forbidden"}`))
+		_, _ = w.Write([]byte(`{"message": "403 Forbidden"}`))
 	}))
 	defer server.Close()
 
@@ -356,13 +356,13 @@ func TestClient_GetMRDetails_HTTPError(t *testing.T) {
 
 	assert.Error(t, err)
 	assert.Nil(t, details)
-	assert.Contains(t, err.Error(), "GitLab API error 403")
+	assert.Contains(t, err.Error(), "gitlab API error 403")
 }
 
 func TestClient_GetMRDetails_InvalidJSON(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"incomplete": json`))
+		_, _ = w.Write([]byte(`{"incomplete": json`))
 	}))
 	defer server.Close()
 
@@ -430,7 +430,7 @@ func TestClient_FetchFileContent_QueryParameters(t *testing.T) {
 			Encoding: "text",
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+		_ = json.NewEncoder(w).Encode(response)
 	}))
 	defer server.Close()
 
@@ -454,7 +454,7 @@ func TestClient_FetchFileContent_EmptyResponse(t *testing.T) {
 			Encoding: "text",
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+		_ = json.NewEncoder(w).Encode(response)
 	}))
 	defer server.Close()
 
@@ -470,4 +470,108 @@ func TestClient_FetchFileContent_EmptyResponse(t *testing.T) {
 	assert.NotNil(t, content)
 	assert.Equal(t, "empty.yaml", content.FileName)
 	assert.Empty(t, content.Content)
+}
+
+func TestClient_ListDirectoryFiles_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "GET", r.Method)
+		assert.Contains(t, r.URL.Path, "/api/v4/projects/123/repository/tree")
+		assert.Contains(t, r.URL.RawQuery, "ref=main")
+		assert.Equal(t, "Bearer test-token", r.Header.Get("Authorization"))
+
+		response := []map[string]string{
+			{"name": "consumer-a.yaml", "type": "blob", "path": "groups/consumer-a.yaml"},
+			{"name": "consumer-b.yaml", "type": "blob", "path": "groups/consumer-b.yaml"},
+			{"name": "subdir", "type": "tree", "path": "groups/subdir"},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(response)
+	}))
+	defer server.Close()
+
+	cfg := config.GitLabConfig{BaseURL: server.URL, Token: "test-token"}
+	client := NewClient(cfg)
+
+	files, err := client.ListDirectoryFiles(123, "dataproducts/analytics/groups", "main")
+
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"consumer-a.yaml", "consumer-b.yaml"}, []string{files[0].Name, files[1].Name})
+}
+
+func TestClient_ListDirectoryFiles_DirectoryNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(404)
+	}))
+	defer server.Close()
+
+	cfg := config.GitLabConfig{BaseURL: server.URL, Token: "test-token"}
+	client := NewClient(cfg)
+
+	files, err := client.ListDirectoryFiles(123, "nonexistent/dir", "main")
+
+	assert.NoError(t, err)
+	assert.Empty(t, files)
+}
+
+func TestClient_ListDirectoryFiles_HTTPErrors(t *testing.T) {
+	tests := []struct {
+		name          string
+		statusCode    int
+		expectedError string
+	}{
+		{
+			name:          "401 Unauthorized",
+			statusCode:    401,
+			expectedError: "gitlab API error 401",
+		},
+		{
+			name:          "500 Internal Server Error",
+			statusCode:    500,
+			expectedError: "gitlab API error 500",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.statusCode)
+			}))
+			defer server.Close()
+
+			cfg := config.GitLabConfig{BaseURL: server.URL, Token: "test-token"}
+			client := NewClient(cfg)
+
+			files, err := client.ListDirectoryFiles(123, "some/dir", "main")
+
+			assert.Error(t, err)
+			assert.Nil(t, files)
+			assert.Contains(t, err.Error(), tt.expectedError)
+		})
+	}
+}
+
+func TestClient_ListDirectoryFiles_NetworkError(t *testing.T) {
+	cfg := config.GitLabConfig{BaseURL: "http://localhost:99999", Token: "test-token"}
+	client := NewClient(cfg)
+
+	files, err := client.ListDirectoryFiles(123, "some/dir", "main")
+
+	assert.Error(t, err)
+	assert.Nil(t, files)
+}
+
+func TestClient_ListDirectoryFiles_EmptyDirectory(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]map[string]string{})
+	}))
+	defer server.Close()
+
+	cfg := config.GitLabConfig{BaseURL: server.URL, Token: "test-token"}
+	client := NewClient(cfg)
+
+	files, err := client.ListDirectoryFiles(123, "empty/dir", "main")
+
+	assert.NoError(t, err)
+	assert.Empty(t, files)
 }

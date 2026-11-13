@@ -1,12 +1,15 @@
-# NAYSAYER File-Based Analysis - Multi-stage Docker build
+# Build argument for version (can be passed from GitHub Actions)
+ARG VERSION=dev
+
+# NAYSAYER - Multi-stage Docker build
 FROM registry.access.redhat.com/ubi9/ubi-minimal:latest AS builder
 
 # Install build dependencies
 RUN microdnf install -y tar gzip ca-certificates
 
 # Install Go
-RUN curl -OL https://go.dev/dl/go1.23.6.linux-amd64.tar.gz && \
-    tar -C /usr/local -xzf go1.23.6.linux-amd64.tar.gz
+RUN curl -OL https://go.dev/dl/go1.26.10.linux-amd64.tar.gz && \
+    tar -C /usr/local -xzf go1.26.10.linux-amd64.tar.gz
 
 WORKDIR /app
 
@@ -50,10 +53,15 @@ ENV PORT=3000
 ENV GITLAB_BASE_URL=https://gitlab.com
 # ENV GITLAB_TOKEN=<set-your-token-here>
 
+# Re-declare ARG after FROM (build args are reset after FROM)
+ARG VERSION=dev
+
 # Labels for documentation
-LABEL org.opencontainers.image.title="NAYSAYER File-Based Analysis"
-LABEL org.opencontainers.image.description="GitLab webhook service for file-based warehouse approval decisions"
-LABEL org.opencontainers.image.version="file-analysis"
+LABEL org.opencontainers.image.title="Naysayer GitLab Automation Platform"
+LABEL org.opencontainers.image.description="Multi-purpose GitLab webhook service for MR validation, auto-rebase, and cleanup"
+LABEL org.opencontainers.image.version="${VERSION}"
 LABEL org.opencontainers.image.source="https://github.com/redhat-data-and-ai/naysayer"
+LABEL org.opencontainers.image.documentation="https://github.com/redhat-data-and-ai/naysayer/blob/main/README.md"
+LABEL org.opencontainers.image.vendor="Red Hat Data and AI"
 
 CMD ["./naysayer"]

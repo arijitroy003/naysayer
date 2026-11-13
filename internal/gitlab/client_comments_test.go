@@ -2,9 +2,11 @@ package gitlab
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/redhat-data-and-ai/naysayer/internal/config"
@@ -38,12 +40,12 @@ func TestAddMRComment_Success(t *testing.T) {
 		// Verify request body
 		body, _ := io.ReadAll(r.Body)
 		var payload map[string]string
-		json.Unmarshal(body, &payload)
+		_ = json.Unmarshal(body, &payload)
 		assert.Equal(t, "Test comment", payload["body"])
 
 		// Return success response
 		w.WriteHeader(201)
-		w.Write([]byte(`{"id": 123, "body": "Test comment"}`))
+		_, _ = w.Write([]byte(`{"id": 123, "body": "Test comment"}`))
 	}))
 	defer server.Close()
 
@@ -64,7 +66,7 @@ func TestAddMRComment_Success(t *testing.T) {
 func TestAddMRComment_UnauthorizedError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(401)
-		w.Write([]byte(`{"message": "401 Unauthorized"}`))
+		_, _ = w.Write([]byte(`{"message": "401 Unauthorized"}`))
 	}))
 	defer server.Close()
 
@@ -86,7 +88,7 @@ func TestAddMRComment_UnauthorizedError(t *testing.T) {
 func TestAddMRComment_NotFoundError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(404)
-		w.Write([]byte(`{"message": "404 Not Found"}`))
+		_, _ = w.Write([]byte(`{"message": "404 Not Found"}`))
 	}))
 	defer server.Close()
 
@@ -108,7 +110,7 @@ func TestAddMRComment_NotFoundError(t *testing.T) {
 func TestAddMRComment_GenericError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
-		w.Write([]byte(`{"message": "Internal Server Error"}`))
+		_, _ = w.Write([]byte(`{"message": "Internal Server Error"}`))
 	}))
 	defer server.Close()
 
@@ -141,7 +143,7 @@ func TestApproveMR_Success(t *testing.T) {
 
 		// Return success response
 		w.WriteHeader(201)
-		w.Write([]byte(`{"id": 123, "approved": true}`))
+		_, _ = w.Write([]byte(`{"id": 123, "approved": true}`))
 	}))
 	defer server.Close()
 
@@ -169,12 +171,12 @@ func TestApproveMRWithMessage_Success(t *testing.T) {
 		// Verify request body contains message
 		body, _ := io.ReadAll(r.Body)
 		var payload map[string]string
-		json.Unmarshal(body, &payload)
+		_ = json.Unmarshal(body, &payload)
 		assert.Equal(t, "Auto-approved: Safe changes", payload["note"])
 
 		// Return success response
 		w.WriteHeader(201)
-		w.Write([]byte(`{"id": 123, "approved": true}`))
+		_, _ = w.Write([]byte(`{"id": 123, "approved": true}`))
 	}))
 	defer server.Close()
 
@@ -199,7 +201,7 @@ func TestApproveMRWithMessage_EmptyMessage(t *testing.T) {
 		assert.Equal(t, "{}", string(body))
 
 		w.WriteHeader(201)
-		w.Write([]byte(`{"id": 123, "approved": true}`))
+		_, _ = w.Write([]byte(`{"id": 123, "approved": true}`))
 	}))
 	defer server.Close()
 
@@ -217,32 +219,53 @@ func TestApproveMRWithMessage_EmptyMessage(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestApproveMRWithMessage_UnauthorizedError(t *testing.T) {
+func TestApproveMRWithMessage_401_BotAlreadyApproved(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(401)
-		w.Write([]byte(`{"message": "401 Unauthorized"}`))
+		switch {
+		case strings.Contains(r.URL.Path, "/approve"):
+			w.WriteHeader(401)
+			_, _ = w.Write([]byte(`{"message": "401 Unauthorized"}`))
+		case r.URL.Path == "/api/v4/user":
+			_, _ = w.Write([]byte(`{"username": "naysayer-bot"}`))
+		case strings.Contains(r.URL.Path, "/approvals"):
+			_, _ = w.Write([]byte(`{"approved_by": [{"user": {"username": "naysayer-bot"}}]}`))
+		}
 	}))
 	defer server.Close()
 
-	cfg := &config.Config{
-		GitLab: config.GitLabConfig{
-			BaseURL: server.URL,
-			Token:   "invalid-token",
-		},
-	}
-
+	cfg := &config.Config{GitLab: config.GitLabConfig{BaseURL: server.URL, Token: "test-token"}}
 	client := NewClientWithConfig(cfg)
 
 	err := client.ApproveMRWithMessage(123, 456, "Test approval")
+	assert.NoError(t, err)
+}
 
+func TestApproveMRWithMessage_401_BotNotApproved(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/approve"):
+			w.WriteHeader(401)
+			_, _ = w.Write([]byte(`{"message": "401 Unauthorized"}`))
+		case r.URL.Path == "/api/v4/user":
+			_, _ = w.Write([]byte(`{"username": "naysayer-bot"}`))
+		case strings.Contains(r.URL.Path, "/approvals"):
+			_, _ = w.Write([]byte(`{"approved_by": []}`))
+		}
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{GitLab: config.GitLabConfig{BaseURL: server.URL, Token: "test-token"}}
+	client := NewClientWithConfig(cfg)
+
+	err := client.ApproveMRWithMessage(123, 456, "Test approval")
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "approval failed: insufficient permissions")
+	assert.Contains(t, err.Error(), "approval failed (status 401)")
 }
 
 func TestApproveMRWithMessage_NotFoundError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(404)
-		w.Write([]byte(`{"message": "404 Not Found"}`))
+		_, _ = w.Write([]byte(`{"message": "404 Not Found"}`))
 	}))
 	defer server.Close()
 
@@ -261,32 +284,31 @@ func TestApproveMRWithMessage_NotFoundError(t *testing.T) {
 	assert.Contains(t, err.Error(), "approval failed: MR not found")
 }
 
-func TestApproveMRWithMessage_AlreadyApprovedError(t *testing.T) {
+func TestApproveMRWithMessage_405_BotAlreadyApproved(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(405)
-		w.Write([]byte(`{"message": "Method Not Allowed"}`))
+		switch {
+		case strings.Contains(r.URL.Path, "/approve"):
+			w.WriteHeader(405)
+			_, _ = w.Write([]byte(`{"message": "Method Not Allowed"}`))
+		case r.URL.Path == "/api/v4/user":
+			_, _ = w.Write([]byte(`{"username": "naysayer-bot"}`))
+		case strings.Contains(r.URL.Path, "/approvals"):
+			_, _ = w.Write([]byte(`{"approved_by": [{"user": {"username": "naysayer-bot"}}]}`))
+		}
 	}))
 	defer server.Close()
 
-	cfg := &config.Config{
-		GitLab: config.GitLabConfig{
-			BaseURL: server.URL,
-			Token:   "test-token",
-		},
-	}
-
+	cfg := &config.Config{GitLab: config.GitLabConfig{BaseURL: server.URL, Token: "test-token"}}
 	client := NewClientWithConfig(cfg)
 
 	err := client.ApproveMRWithMessage(123, 456, "Test approval")
-
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "approval failed: MR already approved or cannot be approved")
+	assert.NoError(t, err)
 }
 
 func TestApproveMRWithMessage_GenericError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
-		w.Write([]byte(`{"message": "Internal Server Error"}`))
+		_, _ = w.Write([]byte(`{"message": "Internal Server Error"}`))
 	}))
 	defer server.Close()
 
@@ -346,7 +368,7 @@ func TestApproveMR_CallsApproveMRWithMessage(t *testing.T) {
 		assert.Equal(t, "{}", string(body))
 
 		w.WriteHeader(201)
-		w.Write([]byte(`{"id": 123, "approved": true}`))
+		_, _ = w.Write([]byte(`{"id": 123, "approved": true}`))
 	}))
 	defer server.Close()
 
@@ -362,4 +384,42 @@ func TestApproveMR_CallsApproveMRWithMessage(t *testing.T) {
 	err := client.ApproveMR(123, 456)
 
 	assert.NoError(t, err)
+}
+
+// TestListMRComments_Pagination tests basic pagination functionality
+func TestListMRComments_Pagination(t *testing.T) {
+	requestCount := 0
+	var serverURL string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+
+		if requestCount == 1 {
+			// Page 1: Return 100 comments with Link header
+			comments := make([]MRComment, 100)
+			for i := 0; i < 100; i++ {
+				comments[i] = MRComment{ID: i + 1, Body: fmt.Sprintf("Comment %d", i+1)}
+			}
+			w.Header().Set("Link", fmt.Sprintf(`<%s?page=2>; rel="next"`, serverURL))
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(comments)
+		} else {
+			// Page 2: Return 50 comments, no Link header
+			comments := make([]MRComment, 50)
+			for i := 0; i < 50; i++ {
+				comments[i] = MRComment{ID: i + 101, Body: fmt.Sprintf("Comment %d", i+101)}
+			}
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(comments)
+		}
+	}))
+	defer server.Close()
+	serverURL = server.URL
+
+	client := NewClient(config.GitLabConfig{BaseURL: server.URL, Token: "test-token"})
+	comments, err := client.ListMRComments(123, 456)
+
+	assert.NoError(t, err)
+	assert.Len(t, comments, 150)
+	assert.Equal(t, 2, requestCount)
 }

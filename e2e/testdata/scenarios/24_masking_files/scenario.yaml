@@ -1,0 +1,16 @@
+name: "Update masking files - valid policy"
+description: "Valid masking policy updates are auto-approved when validation passes"
+
+expected:
+  decision: Approve
+  reason: "All files passed validation"
+  approved: true
+
+  comment_contains:
+    - "✅ **Auto-approved**"
+
+mr_metadata:
+  title: "Update masking policies and tags"
+  author: "testuser"
+  source_branch: "feature/update-masking"
+  target_branch: "main"

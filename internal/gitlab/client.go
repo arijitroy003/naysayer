@@ -1,3 +1,4 @@
+// Package gitlab provides a client for the GitLab API.
 package gitlab
 
 import (
@@ -8,11 +9,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/redhat-data-and-ai/naysayer/internal/config"
+	"github.com/redhat-data-and-ai/naysayer/internal/logging"
+	"go.uber.org/zap"
 )
 
 // Client handles GitLab API operations
@@ -24,32 +29,34 @@ type Client struct {
 // createHTTPClient creates an HTTP client with custom TLS configuration
 func createHTTPClient(cfg config.GitLabConfig) (*http.Client, error) {
 	transport := &http.Transport{}
-	
+
 	// Configure TLS settings
-	tlsConfig := &tls.Config{}
-	
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12, // Enforce TLS 1.2 minimum for security
+	}
+
 	// Handle insecure TLS (skip certificate verification)
 	if cfg.InsecureTLS {
 		tlsConfig.InsecureSkipVerify = true
 	}
-	
+
 	// Handle custom CA certificate
 	if cfg.CACertPath != "" {
 		caCert, err := os.ReadFile(cfg.CACertPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read CA certificate from %s: %w", cfg.CACertPath, err)
 		}
-		
+
 		caCertPool := x509.NewCertPool()
 		if !caCertPool.AppendCertsFromPEM(caCert) {
 			return nil, fmt.Errorf("failed to parse CA certificate from %s", cfg.CACertPath)
 		}
-		
+
 		tlsConfig.RootCAs = caCertPool
 	}
-	
+
 	transport.TLSClientConfig = tlsConfig
-	
+
 	return &http.Client{
 		Transport: transport,
 	}, nil
@@ -62,7 +69,7 @@ func NewClient(cfg config.GitLabConfig) *Client {
 		// Fallback to default client if TLS configuration fails
 		httpClient = &http.Client{}
 	}
-	
+
 	return &Client{
 		config: cfg,
 		http:   httpClient,
@@ -76,7 +83,7 @@ func NewClientWithConfig(cfg *config.Config) *Client {
 		// Fallback to default client if TLS configuration fails
 		httpClient = &http.Client{}
 	}
-	
+
 	return &Client{
 		config: cfg.GitLab,
 		http:   httpClient,
@@ -84,8 +91,9 @@ func NewClientWithConfig(cfg *config.Config) *Client {
 }
 
 // FetchMRChanges fetches merge request changes from GitLab API
+// access_raw_diffs=true prevents GitLab from collapsing large file diffs
 func (c *Client) FetchMRChanges(projectID, mrIID int) ([]FileChange, error) {
-	url := fmt.Sprintf("%s/api/v4/projects/%d/merge_requests/%d/changes",
+	url := fmt.Sprintf("%s/api/v4/projects/%d/merge_requests/%d/changes?access_raw_diffs=true",
 		strings.TrimRight(c.config.BaseURL, "/"), projectID, mrIID)
 
 	req, err := http.NewRequest("GET", url, nil)
@@ -100,7 +108,7 @@ func (c *Client) FetchMRChanges(projectID, mrIID int) ([]FileChange, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
@@ -133,7 +141,7 @@ func (c *Client) FetchMRChanges(projectID, mrIID int) ([]FileChange, error) {
 // ExtractMRInfo extracts merge request information from webhook payload
 func ExtractMRInfo(payload map[string]interface{}) (*MRInfo, error) {
 	var projectID, mrIID int
-	var title, author, sourceBranch, targetBranch string
+	var title, author, sourceBranch, targetBranch, state string
 
 	// Extract from object_attributes
 	if objectAttrs, ok := payload["object_attributes"].(map[string]interface{}); ok {
@@ -158,6 +166,10 @@ func ExtractMRInfo(payload map[string]interface{}) (*MRInfo, error) {
 
 		if targetVal, ok := objectAttrs["target_branch"].(string); ok {
 			targetBranch = targetVal
+		}
+
+		if stateVal, ok := objectAttrs["state"].(string); ok {
+			state = stateVal
 		}
 	}
 
@@ -193,6 +205,7 @@ func ExtractMRInfo(payload map[string]interface{}) (*MRInfo, error) {
 		Author:       author,
 		SourceBranch: sourceBranch,
 		TargetBranch: targetBranch,
+		State:        state,
 	}, nil
 }
 
@@ -204,7 +217,7 @@ func (c *Client) AddMRComment(projectID, mrIID int, comment string) error {
 	payload := map[string]string{
 		"body": comment,
 	}
-	
+
 	jsonPayload, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("failed to marshal comment payload: %w", err)
@@ -222,7 +235,7 @@ func (c *Client) AddMRComment(projectID, mrIID int, comment string) error {
 	if err != nil {
 		return fmt.Errorf("failed to add comment: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case 201:
@@ -258,7 +271,7 @@ func (c *Client) ApproveMRWithMessage(projectID, mrIID int, message string) erro
 	} else {
 		jsonPayload = []byte("{}")
 	}
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to marshal approval payload: %w", err)
 	}
@@ -275,19 +288,956 @@ func (c *Client) ApproveMRWithMessage(projectID, mrIID int, message string) erro
 	if err != nil {
 		return fmt.Errorf("failed to approve MR: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case 200, 201:
+		return nil
+	case 401, 405:
+		// GitLab returns 401 when the bot tries to re-approve an MR it already approved (async race),
+		// or 405 when the MR cannot be approved. Check if we already approved before giving up.
+		if alreadyApproved, checkErr := c.isBotAlreadyApprover(projectID, mrIID); checkErr == nil && alreadyApproved {
+			logging.Warn("Approval API returned %d for MR %d but bot already approved — treating as success", resp.StatusCode, mrIID)
+			return nil
+		}
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("approval failed (status %d): %s", resp.StatusCode, string(body))
+	case 404:
+		return fmt.Errorf("approval failed: MR not found")
+	default:
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("approval failed with status %d: %s", resp.StatusCode, string(body))
+	}
+}
+
+// isBotAlreadyApprover checks the MR's approval list to see if the current bot user has already approved.
+func (c *Client) isBotAlreadyApprover(projectID, mrIID int) (bool, error) {
+	botUsername, err := c.GetCurrentBotUsername()
+	if err != nil {
+		return false, err
+	}
+
+	url := fmt.Sprintf("%s/api/v4/projects/%d/merge_requests/%d/approvals",
+		strings.TrimRight(c.config.BaseURL, "/"), projectID, mrIID)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.config.Token)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != 200 {
+		return false, fmt.Errorf("approvals check returned status %d", resp.StatusCode)
+	}
+
+	var result struct {
+		ApprovedBy []struct {
+			User struct {
+				Username string `json:"username"`
+			} `json:"user"`
+		} `json:"approved_by"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return false, err
+	}
+
+	for _, a := range result.ApprovedBy {
+		if strings.EqualFold(a.User.Username, botUsername) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// ResetNaysayerApproval revokes naysayer's approval for a merge request
+// This is called when naysayer changes its decision from approve to manual review
+func (c *Client) ResetNaysayerApproval(projectID, mrIID int) error {
+	url := fmt.Sprintf("%s/api/v4/projects/%d/merge_requests/%d/unapprove",
+		strings.TrimRight(c.config.BaseURL, "/"), projectID, mrIID)
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer([]byte("{}")))
+	if err != nil {
+		return fmt.Errorf("failed to create reset approval request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+c.config.Token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to reset naysayer approval: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case 201:
 		return nil // Success
 	case 401:
-		return fmt.Errorf("approval failed: insufficient permissions")
+		return fmt.Errorf("reset approval failed: insufficient permissions")
 	case 404:
-		return fmt.Errorf("approval failed: MR not found")
+		return fmt.Errorf("reset approval failed: MR not found")
 	case 405:
-		return fmt.Errorf("approval failed: MR already approved or cannot be approved")
+		return fmt.Errorf("reset approval failed: MR not approved or cannot be reset")
 	default:
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("approval failed with status %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("reset approval failed with status %d: %s", resp.StatusCode, string(body))
 	}
+}
+
+// parseNextLink extracts the "next" page URL from GitLab's Link header
+// GitLab follows RFC 5988 format: <URL>; rel="next", <URL>; rel="prev"
+// Returns empty string if no next link exists
+func parseNextLink(linkHeader string) string {
+	if linkHeader == "" {
+		return ""
+	}
+
+	// Split by comma to handle multiple links
+	links := strings.Split(linkHeader, ",")
+
+	for _, link := range links {
+		link = strings.TrimSpace(link)
+
+		// Check if this is a "next" rel
+		if !strings.Contains(link, `rel="next"`) {
+			continue
+		}
+
+		// Extract URL from angle brackets
+		startIdx := strings.Index(link, "<")
+		endIdx := strings.Index(link, ">")
+
+		if startIdx == -1 || endIdx == -1 || startIdx >= endIdx {
+			continue
+		}
+
+		return link[startIdx+1 : endIdx]
+	}
+
+	return ""
+}
+
+// MRComment represents a GitLab merge request comment
+type MRComment struct {
+	ID        int                    `json:"id"`
+	Body      string                 `json:"body"`
+	CreatedAt string                 `json:"created_at"`
+	UpdatedAt string                 `json:"updated_at"`
+	Author    map[string]interface{} `json:"author"`
+}
+
+// ListMRComments retrieves all comments for a merge request with pagination support
+func (c *Client) ListMRComments(projectID, mrIID int) ([]MRComment, error) {
+	const maxPages = 20 // Safety limit to prevent infinite loops (20 pages = 2000 comments)
+
+	allComments := make([]MRComment, 0, 200) // Pre-allocate for typical case
+
+	// Initial URL with pagination params
+	nextURL := fmt.Sprintf("%s/api/v4/projects/%d/merge_requests/%d/notes?sort=desc&order_by=created_at&per_page=100",
+		strings.TrimRight(c.config.BaseURL, "/"), projectID, mrIID)
+
+	pageCount := 0
+
+	for nextURL != "" && pageCount < maxPages {
+		pageCount++
+
+		// Create request
+		req, err := http.NewRequest("GET", nextURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create list comments request (page %d): %w", pageCount, err)
+		}
+
+		req.Header.Set("Authorization", "Bearer "+c.config.Token)
+
+		// Execute request
+		resp, err := c.http.Do(req)
+		if err != nil {
+			// First page failure is fatal
+			if pageCount == 1 {
+				return nil, fmt.Errorf("failed to list comments: %w", err)
+			}
+			// Subsequent page failures - log and return what we have
+			logging.Warn("Failed to fetch comment page %d for MR %d, returning %d comments", pageCount, mrIID, len(allComments))
+			return allComments, nil
+		}
+
+		// Handle HTTP status
+		switch resp.StatusCode {
+		case 200:
+			var pageComments []MRComment
+			err = json.NewDecoder(resp.Body).Decode(&pageComments)
+			_ = resp.Body.Close()
+			if err != nil {
+				if pageCount == 1 {
+					return nil, fmt.Errorf("failed to decode comments response: %w", err)
+				}
+				logging.Warn("Failed to decode comment page %d for MR %d, returning %d comments", pageCount, mrIID, len(allComments))
+				return allComments, nil
+			}
+
+			allComments = append(allComments, pageComments...)
+
+			// Extract next page URL from Link header
+			nextURL = parseNextLink(resp.Header.Get("Link"))
+
+		case 401:
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("list comments failed: insufficient permissions")
+		case 404:
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("list comments failed: MR not found")
+		default:
+			// For first page, return error. For subsequent pages, gracefully degrade
+			if pageCount == 1 {
+				body, _ := io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+				return nil, fmt.Errorf("list comments failed with status %d: %s", resp.StatusCode, string(body))
+			}
+			_ = resp.Body.Close()
+			logging.Warn("Comment page %d failed with status %d for MR %d, returning %d comments", pageCount, resp.StatusCode, mrIID, len(allComments))
+			return allComments, nil
+		}
+	}
+
+	// Check if we hit the page limit
+	if pageCount >= maxPages && nextURL != "" {
+		logging.Warn("Reached max page limit (%d) for MR %d, returning %d comments", maxPages, mrIID, len(allComments))
+	}
+
+	return allComments, nil
+}
+
+// UpdateMRComment updates an existing comment on a merge request
+func (c *Client) UpdateMRComment(projectID, mrIID, commentID int, newBody string) error {
+	url := fmt.Sprintf("%s/api/v4/projects/%d/merge_requests/%d/notes/%d",
+		strings.TrimRight(c.config.BaseURL, "/"), projectID, mrIID, commentID)
+
+	payload := map[string]string{
+		"body": newBody,
+	}
+
+	jsonPayload, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal update comment payload: %w", err)
+	}
+
+	req, err := http.NewRequest("PUT", url, bytes.NewBuffer(jsonPayload))
+	if err != nil {
+		return fmt.Errorf("failed to create update comment request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+c.config.Token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to update comment: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case 200:
+		return nil // Success
+	case 401:
+		return fmt.Errorf("update comment failed: insufficient permissions")
+	case 404:
+		return fmt.Errorf("update comment failed: comment or MR not found")
+	case 403:
+		return fmt.Errorf("update comment failed: cannot edit this comment")
+	default:
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("update comment failed with status %d: %s", resp.StatusCode, string(body))
+	}
+}
+
+// FindLatestNaysayerComment searches for the most recent comment from the current naysayer bot instance
+// If commentType is provided, only returns comments of that type. If empty, returns any naysayer comment.
+func (c *Client) FindLatestNaysayerComment(projectID, mrIID int, commentType ...string) (*MRComment, error) {
+	comments, err := c.ListMRComments(projectID, mrIID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list comments: %w", err)
+	}
+
+	// Get current bot username (fallback to any naysayer bot if fails)
+	currentBotUsername, _ := c.GetCurrentBotUsername()
+
+	// Determine if we need to filter by comment type
+	filterByType := len(commentType) > 0 && commentType[0] != ""
+
+	// Find the latest matching comment (comments are sorted by created_at desc)
+	for _, comment := range comments {
+		// Check if comment is from our bot and matches type (if specified)
+		if c.isOurBotComment(comment.Author, currentBotUsername) &&
+			(!filterByType || c.matchesCommentType(comment.Body, commentType[0])) {
+			return &comment, nil
+		}
+	}
+
+	return nil, nil // No matching comment found
+}
+
+// isOurBotComment checks if a comment is from our bot instance
+func (c *Client) isOurBotComment(author map[string]interface{}, currentBotUsername string) bool {
+	if currentBotUsername != "" {
+		return author["username"] == currentBotUsername
+	}
+	return c.IsNaysayerBotAuthor(author)
+}
+
+// matchesCommentType checks if a comment body matches the expected comment type
+func (c *Client) matchesCommentType(body, commentType string) bool {
+	switch commentType {
+	case "approval":
+		return strings.Contains(body, "<!-- naysayer-comment-id: approval -->")
+	case "manual-review":
+		return strings.Contains(body, "<!-- naysayer-comment-id: manual-review -->")
+	default:
+		// For unknown types, match any naysayer comment
+		return strings.Contains(body, "<!-- naysayer-comment-id:")
+	}
+}
+
+// GetCurrentBotUsername identifies the current bot's username by calling GitLab API
+func (c *Client) GetCurrentBotUsername() (string, error) {
+	url := fmt.Sprintf("%s/api/v4/user", strings.TrimRight(c.config.BaseURL, "/"))
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create user info request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+c.config.Token)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to get user info: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("user info request failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var userInfo map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&userInfo); err != nil {
+		return "", fmt.Errorf("failed to decode user info response: %w", err)
+	}
+
+	if username, ok := userInfo["username"].(string); ok {
+		return username, nil
+	}
+
+	return "", fmt.Errorf("username not found in user info response")
+}
+
+// IsNaysayerBotAuthor checks if the comment author is a naysayer bot
+func (c *Client) IsNaysayerBotAuthor(author map[string]interface{}) bool {
+	// Check username patterns
+	if username, ok := author["username"].(string); ok {
+		return (strings.HasPrefix(username, "project_") && strings.Contains(username, "_bot_")) ||
+			strings.Contains(username, "naysayer-bot")
+	}
+
+	// Check name field as fallback
+	if name, ok := author["name"].(string); ok {
+		return name == "naysayer-bot"
+	}
+
+	return false
+}
+
+// AddOrUpdateMRComment adds a new comment or updates the latest existing naysayer comment of the same type
+func (c *Client) AddOrUpdateMRComment(projectID, mrIID int, commentBody, commentType string) error {
+	// Find the latest naysayer comment of the same type
+	existingComment, err := c.FindLatestNaysayerComment(projectID, mrIID, commentType)
+	if err != nil {
+		return fmt.Errorf("failed to search for existing comment: %w", err)
+	}
+
+	// Update existing comment or create new one
+	if existingComment != nil {
+		if err := c.UpdateMRComment(projectID, mrIID, existingComment.ID, commentBody); err != nil {
+			// If update fails due to permissions, fallback to creating new comment
+			if strings.Contains(err.Error(), "cannot edit this comment") ||
+				strings.Contains(err.Error(), "insufficient permissions") {
+				return c.AddMRComment(projectID, mrIID, commentBody)
+			}
+			return err
+		}
+		return nil
+	}
+
+	// No existing comment found, create new one
+	return c.AddMRComment(projectID, mrIID, commentBody)
+}
+
+// RebaseMR triggers a rebase for a merge request and verifies it completed successfully.
+// Caller should use CompareBranches() to decide if rebase is needed before calling this.
+func (c *Client) RebaseMR(projectID, mrIID int) (bool, error) {
+	mrDetails, err := c.GetMRDetails(projectID, mrIID)
+	if err != nil {
+		return false, fmt.Errorf("failed to get MR details before rebase: %w", err)
+	}
+	if mrDetails.RebaseInProgress {
+		return false, fmt.Errorf("rebase already in progress for MR %d", mrIID)
+	}
+
+	url := fmt.Sprintf("%s/api/v4/projects/%d/merge_requests/%d/rebase",
+		strings.TrimRight(c.config.BaseURL, "/"), projectID, mrIID)
+	req, err := http.NewRequest("PUT", url, bytes.NewBuffer([]byte("{}")))
+	if err != nil {
+		return false, fmt.Errorf("failed to create rebase request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.config.Token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("failed to rebase MR: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+
+	switch resp.StatusCode {
+	case 202:
+		actuallyRebased, verifyErr := c.verifyRebaseCompleted(projectID, mrIID)
+		if verifyErr != nil {
+			return false, fmt.Errorf("rebase verification failed: %w", verifyErr)
+		}
+		if !actuallyRebased {
+			return false, fmt.Errorf("rebase failed: conflicts detected or rebase could not complete")
+		}
+		return true, nil
+	case 403:
+		return false, fmt.Errorf("rebase failed: insufficient permissions or rebase not allowed: %s", bodyStr)
+	case 404:
+		return false, fmt.Errorf("rebase failed: MR not found")
+	case 409:
+		return false, fmt.Errorf("rebase failed: rebase already in progress or conflicts detected: %s", bodyStr)
+	default:
+		return false, fmt.Errorf("rebase failed with status %d: %s", resp.StatusCode, bodyStr)
+	}
+}
+
+// CompareBranches compares two branches in the same project using GitLab Compare API.
+// Use only for same-project MRs. For fork MRs use CompareCommits with MR.Sha (see auto_rebase).
+// Direction: from=sourceBranch, to=targetBranch (commits in target that source doesn't have).
+func (c *Client) CompareBranches(sourceProjectID int, sourceBranch string, targetProjectID int, targetBranch string) (*CompareResult, error) {
+	if sourceProjectID != targetProjectID {
+		return nil, fmt.Errorf("CompareBranches does not support cross-project: use CompareCommits with MR.Sha for fork MRs")
+	}
+	encodedFrom := url.QueryEscape(sourceBranch)
+	encodedTo := url.QueryEscape(targetBranch)
+	apiURL := fmt.Sprintf("%s/api/v4/projects/%d/repository/compare?from=%s&to=%s",
+		strings.TrimRight(c.config.BaseURL, "/"), targetProjectID, encodedFrom, encodedTo)
+	return c.doCompare(apiURL)
+}
+
+// GetBranchCommit returns the commit SHA of the branch HEAD.
+// GET /projects/:id/repository/branches/:branch
+func (c *Client) GetBranchCommit(projectID int, branch string) (string, error) {
+	encodedBranch := url.QueryEscape(branch)
+	apiURL := fmt.Sprintf("%s/api/v4/projects/%d/repository/branches/%s",
+		strings.TrimRight(c.config.BaseURL, "/"), projectID, encodedBranch)
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create get branch request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.config.Token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to get branch: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("get branch failed with status %d: %s", resp.StatusCode, string(body))
+	}
+	var branchInfo struct {
+		Commit struct {
+			ID string `json:"id"`
+		} `json:"commit"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&branchInfo); err != nil {
+		return "", fmt.Errorf("failed to decode branch response: %w", err)
+	}
+	return branchInfo.Commit.ID, nil
+}
+
+// CompareCommits compares two commits by SHA in one project.
+// Used for fork MRs: GitLab cannot compare across projects by branch; use MR.Sha (source HEAD) and target branch SHA.
+// GET /projects/:id/repository/compare?from=<source_sha>&to=<target_sha>
+func (c *Client) CompareCommits(projectID int, fromSHA, toSHA string) (*CompareResult, error) {
+	encodedFrom := url.QueryEscape(fromSHA)
+	encodedTo := url.QueryEscape(toSHA)
+	apiURL := fmt.Sprintf("%s/api/v4/projects/%d/repository/compare?from=%s&to=%s",
+		strings.TrimRight(c.config.BaseURL, "/"), projectID, encodedFrom, encodedTo)
+	return c.doCompare(apiURL)
+}
+
+func (c *Client) doCompare(apiURL string) (*CompareResult, error) {
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create compare request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.config.Token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compare: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("compare failed with status %d: %s", resp.StatusCode, string(body))
+	}
+	var result CompareResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode compare result: %w", err)
+	}
+	return &result, nil
+}
+
+// verifyRebaseCompleted polls the MR to verify rebase completed successfully.
+// Returns (completedSuccessfully bool, error).
+func (c *Client) verifyRebaseCompleted(projectID, mrIID int) (bool, error) {
+	maxAttempts := 30        // 30 attempts
+	delay := 2 * time.Second // 2 seconds between attempts = max 60 seconds wait
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		time.Sleep(delay)
+
+		mrDetails, err := c.GetMRDetails(projectID, mrIID)
+		if err != nil {
+			logging.MRWarn(mrIID, "Failed to get MR details during rebase verification, retrying",
+				zap.Int("attempt", attempt+1), zap.Error(err))
+			continue
+		}
+
+		if mrDetails.RebaseInProgress {
+			logging.MRInfo(mrIID, "Rebase still in progress, waiting", zap.Int("attempt", attempt+1))
+			continue
+		}
+
+		if mrDetails.HasConflicts || mrDetails.MergeStatus == "cannot_be_merged" {
+			return false, fmt.Errorf("rebase completed but conflicts were introduced (merge_status: %s)", mrDetails.MergeStatus)
+		}
+
+		logging.MRInfo(mrIID, "Rebase completed successfully")
+		return true, nil
+	}
+
+	// Timeout reached - rebase still in progress or verification incomplete
+	return false, fmt.Errorf("rebase verification timeout: max %d seconds exceeded", maxAttempts*int(delay.Seconds()))
+}
+
+// ListOpenMRs returns a list of open MR IIDs for a project
+func (c *Client) ListOpenMRs(projectID int) ([]int, error) {
+	mrDetails, err := c.ListOpenMRsWithDetails(projectID)
+	if err != nil {
+		return nil, err
+	}
+
+	mrIIDs := make([]int, len(mrDetails))
+	for i, mr := range mrDetails {
+		mrIIDs[i] = mr.IID
+	}
+
+	return mrIIDs, nil
+}
+
+// ListOpenMRsWithDetails returns detailed information about open MRs for a project
+// Fetches each MR individually to get complete pipeline information.
+// Note: GitLab's list endpoint doesn't include pipeline data, so we need to
+// fetch each MR individually. This results in N+1 API calls but ensures accurate
+// pipeline status for filtering.
+// Only fetches MRs created within the last 7 days to reduce API load.
+func (c *Client) ListOpenMRsWithDetails(projectID int) ([]MRDetails, error) {
+	// Calculate created_after date (7 days ago) in ISO 8601 format
+	sevenDaysAgo := time.Now().AddDate(0, 0, -7).Format(time.RFC3339)
+
+	// Step 1: Get list of open MR IIDs created in last 7 days (fast, no pipeline data)
+	url := fmt.Sprintf("%s/api/v4/projects/%d/merge_requests?state=opened&per_page=100&created_after=%s",
+		strings.TrimRight(c.config.BaseURL, "/"), projectID, sevenDaysAgo)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create list MRs request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+c.config.Token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list MRs: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("list MRs failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Parse basic MR list (just need IIDs)
+	var basicMRs []struct {
+		IID int `json:"iid"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&basicMRs); err != nil {
+		return nil, fmt.Errorf("failed to decode MRs response: %w", err)
+	}
+
+	if len(basicMRs) == 0 {
+		return []MRDetails{}, nil
+	}
+
+	// Step 2: Fetch each MR individually to get complete details including pipeline
+	detailedMRs := make([]MRDetails, 0, len(basicMRs))
+
+	for _, basicMR := range basicMRs {
+		mrDetails, err := c.GetMRDetails(projectID, basicMR.IID)
+		if err != nil {
+			// Log error but continue with other MRs
+			// Don't fail entire operation if one MR fetch fails
+			logging.Warn("Failed to get details for MR %d in project %d, skipping: %v", basicMR.IID, projectID, err)
+			continue
+		}
+		detailedMRs = append(detailedMRs, *mrDetails)
+	}
+
+	return detailedMRs, nil
+}
+
+// ListAllOpenMRsWithDetails lists all open merge requests for a project (no date filter)
+// This is used by the stale MR cleanup feature to find MRs that are 27-30+ days old
+func (c *Client) ListAllOpenMRsWithDetails(projectID int) ([]MRDetails, error) {
+	var allMRs []MRDetails
+	url := fmt.Sprintf("%s/api/v4/projects/%d/merge_requests?state=opened&per_page=100",
+		strings.TrimRight(c.config.BaseURL, "/"), projectID)
+
+	for url != "" {
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create list MRs request: %w", err)
+		}
+
+		req.Header.Set("Authorization", "Bearer "+c.config.Token)
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list MRs: %w", err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("list MRs failed with status %d: %s", resp.StatusCode, string(body))
+		}
+
+		var mrs []MRDetails
+		err = json.NewDecoder(resp.Body).Decode(&mrs)
+		_ = resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode MRs response: %w", err)
+		}
+
+		allMRs = append(allMRs, mrs...)
+
+		// Get next page URL from Link header using parseNextLink helper
+		url = parseNextLink(resp.Header.Get("Link"))
+	}
+
+	return allMRs, nil
+}
+
+// CloseMR closes a merge request
+func (c *Client) CloseMR(projectID, mrIID int) error {
+	url := fmt.Sprintf("%s/api/v4/projects/%d/merge_requests/%d",
+		strings.TrimRight(c.config.BaseURL, "/"), projectID, mrIID)
+
+	payload := map[string]string{
+		"state_event": "close",
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal close MR payload: %w", err)
+	}
+
+	req, err := http.NewRequest("PUT", url, bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		return fmt.Errorf("failed to create close MR request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+c.config.Token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to close MR: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("close MR failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	logging.Info("Successfully closed MR !%d in project %d", mrIID, projectID)
+	return nil
+}
+
+// GetPipelineJobs retrieves all jobs for a pipeline
+func (c *Client) GetPipelineJobs(projectID, pipelineID int) ([]PipelineJob, error) {
+	url := fmt.Sprintf("%s/api/v4/projects/%d/pipelines/%d/jobs",
+		strings.TrimRight(c.config.BaseURL, "/"), projectID, pipelineID)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create pipeline jobs request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+c.config.Token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get pipeline jobs: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("get pipeline jobs failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var jobs []PipelineJob
+	if err := json.NewDecoder(resp.Body).Decode(&jobs); err != nil {
+		return nil, fmt.Errorf("failed to decode pipeline jobs response: %w", err)
+	}
+
+	return jobs, nil
+}
+
+// JobTrace represents the trace content from a GitLab job
+type JobTrace struct {
+	Content string `json:"content"`
+}
+
+// GetJobTrace retrieves the trace/logs for a specific job
+func (c *Client) GetJobTrace(projectID, jobID int) (string, error) {
+	url := fmt.Sprintf("%s/api/v4/projects/%d/jobs/%d/trace",
+		strings.TrimRight(c.config.BaseURL, "/"), projectID, jobID)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create job trace request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+c.config.Token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to get job trace: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("get job trace failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var trace JobTrace
+	if err := json.NewDecoder(resp.Body).Decode(&trace); err != nil {
+		return "", fmt.Errorf("failed to decode job trace response: %w", err)
+	}
+
+	return trace.Content, nil
+}
+
+// FindLatestAtlantisComment finds the latest comment from atlantis-bot
+func (c *Client) FindLatestAtlantisComment(projectID, mrIID int) (*MRComment, error) {
+	comments, err := c.ListMRComments(projectID, mrIID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list comments: %w", err)
+	}
+
+	// Log all comments for debugging
+	logging.Info("Found %d comments for MR %d", len(comments), mrIID)
+	for i, comment := range comments {
+		if i < 5 { // Log first 5 comments for debugging
+			authorUsername := "unknown"
+			authorName := "unknown"
+			if username, ok := comment.Author["username"].(string); ok {
+				authorUsername = username
+			}
+			if name, ok := comment.Author["name"].(string); ok {
+				authorName = name
+			}
+			isAtlantis := c.isAtlantisBotComment(comment.Author)
+			bodyPreview := truncateString(comment.Body, 100)
+			logging.Info("Comment %d: author=%s/%s, is_atlantis=%v, preview=%s (MR %d)",
+				i, authorUsername, authorName, isAtlantis, bodyPreview, mrIID)
+		}
+	}
+
+	// Find the latest atlantis comment
+	// Comments are already sorted by created_at desc from ListMRComments
+	for _, comment := range comments {
+		// Check if comment is from atlantis-bot
+		if c.isAtlantisBotComment(comment.Author) {
+			logging.Info("Found atlantis comment for MR %d", mrIID)
+			return &comment, nil
+		}
+	}
+
+	logging.Info("No atlantis comment found in %d comments for MR %d", len(comments), mrIID)
+	return nil, nil // No atlantis comment found
+}
+
+// truncateString truncates a string to maxLen characters
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
+// isAtlantisBotComment checks if a comment is from atlantis-bot
+func (c *Client) isAtlantisBotComment(author map[string]interface{}) bool {
+	// Common atlantis bot username patterns
+	atlantisPatterns := []string{
+		"atlantis",
+		"atlatnis", // Common typo
+		"atlantis-bot",
+		"atlantisbot",
+		"atlatnisbot",
+	}
+
+	// Check username field (primary check)
+	if username, ok := author["username"].(string); ok {
+		usernameLower := strings.ToLower(username)
+		for _, pattern := range atlantisPatterns {
+			if strings.Contains(usernameLower, pattern) {
+				return true
+			}
+		}
+	}
+
+	// Check name field as fallback
+	if name, ok := author["name"].(string); ok {
+		nameLower := strings.ToLower(name)
+		for _, pattern := range atlantisPatterns {
+			if strings.Contains(nameLower, pattern) {
+				return true
+			}
+		}
+	}
+
+	// Check if author is a bot (some GitLab instances mark bots differently)
+	if bot, ok := author["bot"].(bool); ok && bot {
+		// If it's marked as a bot, check if username/name contains atlantis
+		if username, ok := author["username"].(string); ok {
+			usernameLower := strings.ToLower(username)
+			for _, pattern := range atlantisPatterns {
+				if strings.Contains(usernameLower, pattern) {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+// AreAllPipelineJobsSucceeded checks if all non-allow-failure jobs in a pipeline succeeded
+func (c *Client) AreAllPipelineJobsSucceeded(projectID, pipelineID int) (bool, error) {
+	jobs, err := c.GetPipelineJobs(projectID, pipelineID)
+	if err != nil {
+		return false, fmt.Errorf("failed to get pipeline jobs: %w", err)
+	}
+
+	if len(jobs) == 0 {
+		// No jobs found, consider it as succeeded
+		return true, nil
+	}
+
+	// Check if all non-allow-failure jobs succeeded
+	for _, job := range jobs {
+		// Skip jobs that are allowed to fail
+		if job.AllowFailure {
+			continue
+		}
+
+		// Check job status
+		status := strings.ToLower(job.Status)
+		if status != "success" && status != "skipped" {
+			return false, nil
+		}
+	}
+
+	return true, nil
+}
+
+// CheckAtlantisCommentForPlanFailures checks the latest atlantis comment for plan failures
+// Returns (shouldSkip, reason) where:
+// - shouldSkip=true means rebase should be skipped
+// - reason explains why (e.g., "atlantis_plan_failed", "atlantis_plan_locked")
+// - If shouldSkip=false, reason will be empty or "atlantis_plan_locked"
+func (c *Client) CheckAtlantisCommentForPlanFailures(projectID, mrIID int) (bool, string) {
+	atlantisComment, err := c.FindLatestAtlantisComment(projectID, mrIID)
+	if err != nil {
+		// If we can't find the comment, don't skip (safer to allow rebase)
+		return false, ""
+	}
+
+	if atlantisComment == nil {
+		// No atlantis comment found - if pipeline is failed, skip rebase to be safe
+		// (We can't determine if it's a state lock or real error without the comment)
+		return true, "atlantis_comment_not_found"
+	}
+
+	commentBody := strings.ToLower(atlantisComment.Body)
+
+	// Check if failure is due to state lock (which we can ignore)
+	// Only check for the specific Terraform state lock error message
+	// If it's state lock, allow rebase; otherwise, skip rebase
+	hasStateLock := strings.Contains(commentBody, "error acquiring the state lock")
+
+	if hasStateLock {
+		// State lock detected - this is temporary, allow rebase
+		return false, "atlantis_plan_locked"
+	}
+
+	// Not a state lock error - skip rebase
+	return true, "atlantis_plan_failed"
+}
+
+// FindCommentByPattern checks if a comment containing the specified pattern exists on an MR
+func (c *Client) FindCommentByPattern(projectID, mrIID int, pattern string) (bool, error) {
+	comments, err := c.ListMRComments(projectID, mrIID)
+	if err != nil {
+		return false, fmt.Errorf("failed to list comments: %w", err)
+	}
+
+	// Search through comments for the pattern
+	for _, comment := range comments {
+		if strings.Contains(comment.Body, pattern) {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }

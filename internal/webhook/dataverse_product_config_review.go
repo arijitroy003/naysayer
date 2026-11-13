@@ -10,12 +10,13 @@ import (
 	"github.com/redhat-data-and-ai/naysayer/internal/logging"
 	"github.com/redhat-data-and-ai/naysayer/internal/rules"
 	"github.com/redhat-data-and-ai/naysayer/internal/rules/shared"
+	"github.com/redhat-data-and-ai/naysayer/internal/utils"
 	"go.uber.org/zap"
 )
 
 // DataProductConfigMrReviewHandler handles GitLab webhook requests
 type DataProductConfigMrReviewHandler struct {
-	gitlabClient *gitlab.Client
+	gitlabClient gitlab.GitLabClient
 	ruleManager  shared.RuleManager
 	config       *config.Config
 }
@@ -23,24 +24,33 @@ type DataProductConfigMrReviewHandler struct {
 // NewDataProductConfigMrReviewHandler creates a new webhook handler
 func NewDataProductConfigMrReviewHandler(cfg *config.Config) *DataProductConfigMrReviewHandler {
 	gitlabClient := gitlab.NewClientWithConfig(cfg)
+	return NewDataProductConfigMrReviewHandlerWithClient(cfg, gitlabClient)
+}
 
-	// Create rule manager for dataverse product config  
-	// Use the old client constructor for the rule manager since it doesn't need dry-run mode
-	ruleManagerClient := gitlab.NewClient(cfg.GitLab)
-	manager := rules.CreateDataverseRuleManager(ruleManagerClient)
+// NewDataProductConfigMrReviewHandlerWithClient creates a webhook handler with a custom GitLab client
+// This is primarily used for testing with mock clients
+func NewDataProductConfigMrReviewHandlerWithClient(cfg *config.Config, client gitlab.GitLabClient) *DataProductConfigMrReviewHandler {
+	// Create rule manager for dataverse product config
+	manager, err := rules.CreateSectionBasedDataverseManager(client)
+	if err != nil {
+		logging.Error("Failed to create section-based rule manager: %v", err)
+		panic(fmt.Sprintf("Critical error: cannot start without section-based validation: %v", err))
+	}
 
-	// Log security configuration
-	logging.Info("Webhook security: %s", cfg.WebhookSecurityMode())
-	if len(cfg.Webhook.AllowedIPs) > 0 {
-		logging.Info("IP restrictions enabled: %v", cfg.Webhook.AllowedIPs)
+	// Log security configuration (skip in tests if config is minimal)
+	if cfg.Webhook.AllowedIPs != nil {
+		logging.Info("Webhook security: %s", cfg.WebhookSecurityMode())
+		if len(cfg.Webhook.AllowedIPs) > 0 {
+			logging.Info("IP restrictions enabled: %v", cfg.Webhook.AllowedIPs)
+		}
 	}
 
 	// Log comments configuration
-	logging.Info("MR Comments: %t (verbosity: %s)", 
+	logging.Info("MR Comments: %t (verbosity: %s)",
 		cfg.Comments.EnableMRComments, cfg.Comments.CommentVerbosity)
 
 	return &DataProductConfigMrReviewHandler{
-		gitlabClient: gitlabClient,
+		gitlabClient: client,
 		ruleManager:  manager,
 		config:       cfg,
 	}
@@ -66,6 +76,14 @@ func (h *DataProductConfigMrReviewHandler) HandleWebhook(c *fiber.Ctx) error {
 		logging.Error("Failed to parse payload: %v", err)
 		return c.Status(400).JSON(fiber.Map{
 			"error": "Invalid JSON payload",
+		})
+	}
+
+	// Validate webhook payload structure
+	if err := h.validateWebhookPayload(payload); err != nil {
+		logging.Warn("Webhook validation failed: %v", err)
+		return c.Status(400).JSON(fiber.Map{
+			"error": "Invalid webhook payload: " + err.Error(),
 		})
 	}
 
@@ -100,8 +118,44 @@ func (h *DataProductConfigMrReviewHandler) evaluateRules(projectID, mrID int, mr
 				Type:   shared.ManualReview,
 				Reason: "Could not fetch MR changes from GitLab API",
 			},
-			RuleResults:   []shared.RuleResult{},
-			ExecutionTime: 0,
+			FileValidations: make(map[string]*shared.FileValidationSummary),
+			ExecutionTime:   0,
+		}, nil
+	}
+
+	// Validate MR has substantive changes
+	// Performance: O(1) for empty check, O(n) with early-exit for diff check
+	if len(changes) == 0 {
+		logging.MRWarn(mrID, "Empty MR detected - no file changes")
+		return &shared.RuleEvaluation{
+			FinalDecision: shared.Decision{
+				Type:    shared.ManualReview,
+				Reason:  "MR contains no file changes",
+				Summary: "Empty MR",
+			},
+			FileValidations: make(map[string]*shared.FileValidationSummary),
+		}, nil
+	}
+
+	// Check for net-zero changes (all diffs empty)
+	hasSubstantiveChange := false
+	for _, change := range changes {
+		if change.Diff != "" {
+			hasSubstantiveChange = true
+			break // Early exit optimization
+		}
+	}
+
+	if !hasSubstantiveChange {
+		logging.MRWarn(mrID, "Net-zero changes detected",
+			zap.Int("file_count", len(changes)))
+		return &shared.RuleEvaluation{
+			FinalDecision: shared.Decision{
+				Type:    shared.ManualReview,
+				Reason:  "MR has no substantive changes",
+				Summary: "Net-zero changes",
+			},
+			FileValidations: make(map[string]*shared.FileValidationSummary),
 		}, nil
 	}
 
@@ -118,12 +172,11 @@ func (h *DataProductConfigMrReviewHandler) evaluateRules(projectID, mrID int, mr
 
 	// Evaluate all rules using the simple rule manager
 	result := h.ruleManager.EvaluateAll(mrContext)
-	
+
 	// Log rule evaluation completion
-	logging.MRInfo(mrID, "Rule evaluation completed", 
-		zap.String("decision", string(result.FinalDecision.Type)), 
-		zap.Int("rules_evaluated", len(result.RuleResults)))
-	
+	logging.MRInfo(mrID, "Rule evaluation completed",
+		zap.String("decision", string(result.FinalDecision.Type)),
+		zap.Int("files_evaluated", result.TotalFiles))
 	return result, nil
 }
 
@@ -134,12 +187,25 @@ func (h *DataProductConfigMrReviewHandler) handleApprovalWithComments(result *sh
 	// Add detailed comment to MR if enabled
 	if h.config.Comments.EnableMRComments {
 		comment := messageBuilder.BuildApprovalComment(result, mrInfo)
-		
-		if err := h.gitlabClient.AddMRComment(mrInfo.ProjectID, mrInfo.MRIID, comment); err != nil {
-			logging.MRError(mrInfo.MRIID, "Failed to add comment", err)
-			// Continue with approval even if comment fails - comment is nice-to-have
+
+		logging.MRInfo(mrInfo.MRIID, "Adding/updating approval comment")
+
+		// Use smart comment handling (update existing or create new)
+		if h.config.Comments.UpdateExistingComments {
+			if err := h.gitlabClient.AddOrUpdateMRComment(mrInfo.ProjectID, mrInfo.MRIID, comment, "approval"); err != nil {
+				logging.MRError(mrInfo.MRIID, "Failed to add/update comment", err)
+				// Continue with approval even if comment fails - comment is nice-to-have
+			} else {
+				logging.MRInfo(mrInfo.MRIID, "Added/updated approval comment")
+			}
 		} else {
-			logging.MRInfo(mrInfo.MRIID, "Added approval comment")
+			// Legacy behavior: always create new comment
+			if err := h.gitlabClient.AddMRComment(mrInfo.ProjectID, mrInfo.MRIID, comment); err != nil {
+				logging.MRError(mrInfo.MRIID, "Failed to add comment", err)
+				// Continue with approval even if comment fails - comment is nice-to-have
+			} else {
+				logging.MRInfo(mrInfo.MRIID, "Added approval comment")
+			}
 		}
 	} else {
 		logging.MRInfo(mrInfo.MRIID, "Skipping comment (comments disabled)")
@@ -147,7 +213,8 @@ func (h *DataProductConfigMrReviewHandler) handleApprovalWithComments(result *sh
 
 	// Approve the MR with message
 	approvalMessage := messageBuilder.BuildApprovalMessage(result)
-	
+	logging.MRInfo(mrInfo.MRIID, "Approving MR with message", zap.String("message", approvalMessage))
+
 	if err := h.gitlabClient.ApproveMRWithMessage(mrInfo.ProjectID, mrInfo.MRIID, approvalMessage); err != nil {
 		// Try fallback to simple approval if message approval fails
 		logging.MRWarn(mrInfo.MRIID, "Failed to approve with message, trying simple approval", zap.Error(err))
@@ -166,15 +233,37 @@ func (h *DataProductConfigMrReviewHandler) handleApprovalWithComments(result *sh
 func (h *DataProductConfigMrReviewHandler) handleManualReviewWithComments(result *shared.RuleEvaluation, mrInfo *gitlab.MRInfo) error {
 	messageBuilder := NewMessageBuilder(h.config)
 
+	// Reset any previous naysayer approval since manual review is now required
+	logging.MRInfo(mrInfo.MRIID, "Resetting any previous naysayer approval")
+	if err := h.gitlabClient.ResetNaysayerApproval(mrInfo.ProjectID, mrInfo.MRIID); err != nil {
+		// Log warning but continue - reset might fail if not previously approved by naysayer
+		logging.MRWarn(mrInfo.MRIID, "Could not reset previous naysayer approval (may not have been approved)", zap.Error(err))
+	} else {
+		logging.MRInfo(mrInfo.MRIID, "Successfully reset previous naysayer approval")
+	}
+
 	// Add informational comment to MR if enabled
 	if h.config.Comments.EnableMRComments {
 		comment := messageBuilder.BuildManualReviewComment(result, mrInfo)
-		
-		if err := h.gitlabClient.AddMRComment(mrInfo.ProjectID, mrInfo.MRIID, comment); err != nil {
-			logging.MRError(mrInfo.MRIID, "Failed to add manual review comment", err)
-			// Continue without error - comment is nice-to-have
+
+		logging.MRInfo(mrInfo.MRIID, "Adding/updating manual review comment")
+
+		// Use smart comment handling (update existing or create new)
+		if h.config.Comments.UpdateExistingComments {
+			if err := h.gitlabClient.AddOrUpdateMRComment(mrInfo.ProjectID, mrInfo.MRIID, comment, "manual-review"); err != nil {
+				logging.MRError(mrInfo.MRIID, "Failed to add/update manual review comment", err)
+				// Continue without error - comment is nice-to-have
+			} else {
+				logging.MRInfo(mrInfo.MRIID, "Added/updated manual review comment")
+			}
 		} else {
-			logging.MRInfo(mrInfo.MRIID, "Added manual review comment")
+			// Legacy behavior: always create new comment
+			if err := h.gitlabClient.AddMRComment(mrInfo.ProjectID, mrInfo.MRIID, comment); err != nil {
+				logging.MRError(mrInfo.MRIID, "Failed to add manual review comment", err)
+				// Continue without error - comment is nice-to-have
+			} else {
+				logging.MRInfo(mrInfo.MRIID, "Added manual review comment")
+			}
 		}
 	} else {
 		logging.MRInfo(mrInfo.MRIID, "Skipping manual review comment (comments disabled)")
@@ -183,8 +272,51 @@ func (h *DataProductConfigMrReviewHandler) handleManualReviewWithComments(result
 	return nil
 }
 
+// handleCommentOnlyWithComments posts an informational comment without approving or requesting review
+func (h *DataProductConfigMrReviewHandler) handleCommentOnlyWithComments(result *shared.RuleEvaluation, mrInfo *gitlab.MRInfo) error {
+	messageBuilder := NewMessageBuilder(h.config)
+
+	if h.config.Comments.EnableMRComments {
+		comment := messageBuilder.BuildCommentOnlyComment(result)
+
+		logging.MRInfo(mrInfo.MRIID, "Adding/updating comment-only message (no MR decision)")
+
+		if h.config.Comments.UpdateExistingComments {
+			if err := h.gitlabClient.AddOrUpdateMRComment(mrInfo.ProjectID, mrInfo.MRIID, comment, "comment-only"); err != nil {
+				logging.MRError(mrInfo.MRIID, "Failed to add/update comment-only message", err)
+				return err
+			}
+			logging.MRInfo(mrInfo.MRIID, "Added/updated comment-only message")
+		} else {
+			if err := h.gitlabClient.AddMRComment(mrInfo.ProjectID, mrInfo.MRIID, comment); err != nil {
+				logging.MRError(mrInfo.MRIID, "Failed to add comment-only message", err)
+				return err
+			}
+			logging.MRInfo(mrInfo.MRIID, "Added comment-only message")
+		}
+	} else {
+		logging.MRInfo(mrInfo.MRIID, "Skipping comment-only message (comments disabled)")
+	}
+
+	return nil
+}
+
 // handleMergeRequestEvent handles traditional MR events (immediate processing)
 func (h *DataProductConfigMrReviewHandler) handleMergeRequestEvent(c *fiber.Ctx, payload map[string]interface{}) error {
+	// simplified: Only process "open" and "update" actions. Other actions (approved, unapproved,
+	// merge, close) don't change the diff, so re-evaluating is wasteful and causes
+	// approve→unapprove→approve churn when multiple webhooks race.
+	if objectAttrs, ok := payload["object_attributes"].(map[string]interface{}); ok {
+		if action, ok := objectAttrs["action"].(string); ok && action != "open" && action != "update" && action != "reopen" {
+			logging.Info("Skipping MR action '%s' - only processing open/update/reopen", action)
+			return c.JSON(fiber.Map{
+				"webhook_response": "processed",
+				"decision":         "skipped",
+				"reason":           fmt.Sprintf("Action '%s' does not require re-evaluation", action),
+			})
+		}
+	}
+
 	// Extract MR information
 	mrInfo, err := gitlab.ExtractMRInfo(payload)
 	if err != nil {
@@ -194,9 +326,43 @@ func (h *DataProductConfigMrReviewHandler) handleMergeRequestEvent(c *fiber.Ctx,
 		})
 	}
 
-	logging.MRInfo(mrInfo.MRIID, "Processing MR event", 
-		zap.Int("project_id", mrInfo.ProjectID), 
-		zap.String("author", mrInfo.Author))
+	logging.MRInfo(mrInfo.MRIID, "Processing MR event",
+		zap.Int("project_id", mrInfo.ProjectID),
+		zap.String("author", mrInfo.Author),
+		zap.String("state", mrInfo.State))
+
+	// Skip rule evaluation if MR is not open
+	if mrInfo.State != utils.MRStateOpened {
+		logging.MRInfo(mrInfo.MRIID, "Skipping rule evaluation for non-open MR",
+			zap.String("state", mrInfo.State))
+
+		return c.JSON(fiber.Map{
+			"webhook_response": "processed",
+			"event_type":       "merge_request",
+			"decision":         "skipped",
+			"reason":           fmt.Sprintf("MR state is '%s', only processing open MRs", mrInfo.State),
+			"mr_approved":      false,
+			"project_id":       mrInfo.ProjectID,
+			"mr_iid":           mrInfo.MRIID,
+		})
+	}
+
+	// Skip rule evaluation for draft MRs - no comments, no approval, no processing
+	mrCtx := &shared.MRContext{MRInfo: mrInfo}
+	if shared.IsDraftMR(mrCtx) {
+		logging.MRInfo(mrInfo.MRIID, "Skipping rule evaluation for draft MR",
+			zap.String("title", mrInfo.Title))
+
+		return c.JSON(fiber.Map{
+			"webhook_response": "processed",
+			"event_type":       "merge_request",
+			"decision":         "skipped",
+			"reason":           "Draft MR - skipped processing to avoid bypassing validation rules",
+			"mr_approved":      false,
+			"project_id":       mrInfo.ProjectID,
+			"mr_iid":           mrInfo.MRIID,
+		})
+	}
 
 	// Fast evaluation using rule manager
 	result, err := h.evaluateRules(mrInfo.ProjectID, mrInfo.MRIID, mrInfo)
@@ -208,14 +374,15 @@ func (h *DataProductConfigMrReviewHandler) handleMergeRequestEvent(c *fiber.Ctx,
 	}
 
 	// Log decision with execution time
-	logging.MRInfo(mrInfo.MRIID, "Decision", 
-		zap.String("type", string(result.FinalDecision.Type)), 
-		zap.String("reason", result.FinalDecision.Reason), 
+	logging.MRInfo(mrInfo.MRIID, "Decision",
+		zap.String("type", string(result.FinalDecision.Type)),
+		zap.String("reason", result.FinalDecision.Reason),
 		zap.Duration("execution_time", result.ExecutionTime))
 
 	// Handle approval with comments if decision is to approve
 	approved := false
-	if result.FinalDecision.Type == shared.Approve {
+	switch result.FinalDecision.Type {
+	case shared.Approve:
 		if err := h.handleApprovalWithComments(result, mrInfo); err != nil {
 			logging.MRError(mrInfo.MRIID, "Failed to approve", err)
 			return c.Status(500).JSON(fiber.Map{
@@ -223,11 +390,15 @@ func (h *DataProductConfigMrReviewHandler) handleMergeRequestEvent(c *fiber.Ctx,
 			})
 		}
 		approved = true
-	} else {
+	case shared.CommentOnly:
+		if err := h.handleCommentOnlyWithComments(result, mrInfo); err != nil {
+			logging.MRError(mrInfo.MRIID, "Failed to add comment-only message", err)
+		}
+		logging.MRInfo(mrInfo.MRIID, "Comment only - no MR decision", zap.String("reason", result.FinalDecision.Reason))
+	default:
 		// Handle manual review with informational comments
 		if err := h.handleManualReviewWithComments(result, mrInfo); err != nil {
 			logging.MRError(mrInfo.MRIID, "Failed to add manual review comment", err)
-			// Continue - comment failure shouldn't block the webhook response
 		}
 		logging.MRInfo(mrInfo.MRIID, "Manual review required", zap.String("reason", result.FinalDecision.Reason))
 	}
@@ -238,13 +409,41 @@ func (h *DataProductConfigMrReviewHandler) handleMergeRequestEvent(c *fiber.Ctx,
 		"event_type":       "merge_request",
 		"decision":         result.FinalDecision,
 		"execution_time":   result.ExecutionTime.String(),
-		"rules_evaluated":  len(result.RuleResults),
+		"rules_evaluated":  result.TotalFiles,
 		"mr_approved":      approved,
 		"project_id":       mrInfo.ProjectID,
 		"mr_iid":           mrInfo.MRIID,
 	})
 }
 
+// validateWebhookPayload performs security validation on webhook payload
+func (h *DataProductConfigMrReviewHandler) validateWebhookPayload(payload map[string]interface{}) error {
+	// Check for required top-level fields
+	if payload == nil {
+		return fmt.Errorf("payload is nil")
+	}
 
+	// Validate object_attributes section
+	objectAttrs, ok := payload["object_attributes"]
+	if !ok {
+		return fmt.Errorf("missing object_attributes")
+	}
 
+	objectAttrsMap, ok := objectAttrs.(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("object_attributes must be an object")
+	}
 
+	// Validate state field if present
+	if state, exists := objectAttrsMap["state"]; exists {
+		if stateStr, ok := state.(string); ok {
+			if stateStr != utils.MRStateOpened {
+				return fmt.Errorf("MR state: %s. Naysayer only processes Open MRs", stateStr)
+			}
+		} else {
+			return fmt.Errorf("state must be a string")
+		}
+	}
+
+	return nil
+}

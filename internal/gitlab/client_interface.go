@@ -1,0 +1,55 @@
+package gitlab
+
+// GitLabClient is an interface for GitLab API operations
+// This interface allows for easy mocking in tests
+type GitLabClient interface {
+	// File operations
+	FetchFileContent(projectID int, filePath, ref string) (*FileContent, error)
+	GetMRTargetBranch(projectID, mrIID int) (string, error)
+	GetMRDetails(projectID, mrIID int) (*MRDetails, error)
+	// ListDirectoryFiles lists files in a directory using GitLab Repository Tree API
+	ListDirectoryFiles(projectID int, dirPath, ref string) ([]RepositoryFile, error)
+
+	// MR changes
+	FetchMRChanges(projectID, mrIID int) ([]FileChange, error)
+
+	// Comments
+	AddMRComment(projectID, mrIID int, comment string) error
+	AddOrUpdateMRComment(projectID, mrIID int, commentBody, commentType string) error
+	ListMRComments(projectID, mrIID int) ([]MRComment, error)
+	UpdateMRComment(projectID, mrIID, commentID int, newBody string) error
+	FindLatestNaysayerComment(projectID, mrIID int, commentType ...string) (*MRComment, error)
+
+	// Approvals
+	ApproveMR(projectID, mrIID int) error
+	ApproveMRWithMessage(projectID, mrIID int, message string) error
+	ResetNaysayerApproval(projectID, mrIID int) error
+
+	// Bot identity
+	GetCurrentBotUsername() (string, error)
+	IsNaysayerBotAuthor(author map[string]interface{}) bool
+
+	// Rebase operations
+	RebaseMR(projectID, mrIID int) (bool, error) // Returns (success, error)
+	CompareBranches(sourceProjectID int, sourceBranch string, targetProjectID int, targetBranch string) (*CompareResult, error)
+	// GetBranchCommit returns the commit SHA of the branch HEAD (for fork MR SHA-based compare)
+	GetBranchCommit(projectID int, branch string) (string, error)
+	// CompareCommits compares two commits by SHA in one project (used for fork MRs; GitLab cannot compare across projects by branch)
+	CompareCommits(projectID int, fromSHA, toSHA string) (*CompareResult, error)
+	ListOpenMRs(projectID int) ([]int, error)
+	ListOpenMRsWithDetails(projectID int) ([]MRDetails, error)
+
+	// Pipeline and job operations
+	GetPipelineJobs(projectID, pipelineID int) ([]PipelineJob, error)
+	GetJobTrace(projectID, jobID int) (string, error)
+	FindLatestAtlantisComment(projectID, mrIID int) (*MRComment, error)
+	AreAllPipelineJobsSucceeded(projectID, pipelineID int) (bool, error)
+	CheckAtlantisCommentForPlanFailures(projectID, mrIID int) (bool, string)
+	// Stale MR cleanup operations
+	ListAllOpenMRsWithDetails(projectID int) ([]MRDetails, error)
+	CloseMR(projectID, mrIID int) error
+	FindCommentByPattern(projectID, mrIID int, pattern string) (bool, error)
+}
+
+// Verify that Client implements GitLabClient interface
+var _ GitLabClient = (*Client)(nil)

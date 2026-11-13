@@ -24,6 +24,8 @@ func setupRoutes(app *fiber.App, cfg *config.Config) {
 	// Create handlers
 	dataProductConfigMrReviewHandler := webhook.NewDataProductConfigMrReviewHandler(cfg)
 	healthHandler := webhook.NewHealthHandler(cfg)
+	autoRebaseHandler := webhook.NewAutoRebaseHandler(cfg)
+	staleMRCleanupHandler := webhook.NewStaleMRCleanupHandler(cfg)
 
 	// Health and monitoring routes
 	app.Get("/health", healthHandler.HandleHealth)
@@ -31,6 +33,12 @@ func setupRoutes(app *fiber.App, cfg *config.Config) {
 
 	// Webhook routes
 	app.Post("/dataverse-product-config-review", dataProductConfigMrReviewHandler.HandleWebhook)
+
+	// Auto-rebase route (generic, reusable)
+	app.Post("/auto-rebase", autoRebaseHandler.HandleWebhook)
+
+	// Stale MR cleanup route
+	app.Post("/stale-mr-cleanup", staleMRCleanupHandler.HandleWebhook)
 }
 
 func main() {

@@ -1,0 +1,201 @@
+# Rule-Based Validation Configuration for dataproduct-config repository
+
+enabled: true
+
+ignore_files:
+  - name: "group_configs"
+    path: "dataproducts/**/groups/"
+    filename: "*.{yaml,yml}"
+  - name: "access_request_group_members"
+    path: "dataproducts/**/access-requests/groups/*/"
+    filename: "*.{yaml,yml}"
+  - name: "dataproduct_info"
+    path: "dataproducts/**/"
+    filename: "info.{yaml,yml}"
+
+
+files:
+  # Product configuration files - Critical infrastructure validation
+  - name: "product_configs"
+    path: "dataproducts/**/"
+    filename: "product.{yaml,yml}"
+    parser_type: yaml
+    enabled: true
+    sections:
+      # Critical sections - always require manual review
+      - name: warehouses
+        yaml_path: warehouses
+        rule_configs:
+          - name: warehouse_rule
+            enabled: true
+        auto_approve: false
+
+      # Full file validation for new products in preprod/prod
+      - name: full_file_toc_validation
+        yaml_path: .
+        rule_configs:
+          - name: toc_approval_rule
+            enabled: true
+        auto_approve: false
+
+      # Consumer access changes - auto-approve with data product owner approval
+      - name: data_product_db_validation
+        yaml_path: data_product_db
+        rule_configs:
+          - name: dataproduct_consumer_rule
+            enabled: true
+          - name: access_policy_rule
+            enabled: true
+          - name: ai_status_rule
+            enabled: true
+        auto_approve: false
+
+      - name: service_account
+        yaml_path: service_account
+        rule_configs:
+          - name: metadata_rule
+            enabled: true
+        auto_approve: false
+
+      - name: service_account_validx
+        yaml_path: service_account.validx
+        rule_configs:
+          - name: metadata_rule
+            enabled: true
+        auto_approve: true
+
+      - name: name
+        yaml_path: name
+        rule_configs:
+          - name: metadata_rule
+            enabled: true
+        auto_approve: true
+
+      - name: rover_group
+        yaml_path: rover_group
+        rule_configs:
+          - name: metadata_rule
+            enabled: true
+        auto_approve: true
+
+      - name: tags
+        yaml_path: tags
+        rule_configs:
+          - name: metadata_rule
+            enabled: true
+        auto_approve: true
+
+      - name: kind
+        yaml_path: kind
+        rule_configs:
+          - name: metadata_rule
+            enabled: true
+        auto_approve: true
+
+  # Documentation files - Auto-approve
+  - name: "documentation_files"
+    path: "**/"
+    filename: "*.md"
+    parser_type: yaml
+    enabled: true
+    sections:
+      - name: full_file_doc_validation
+        yaml_path: .
+        rule_configs:
+          - name: metadata_rule
+            enabled: true
+        auto_approve: true
+
+  # Source binding configuration files - Low risk, can auto-approve
+  - name: "source_bindings"
+    path: "dataproducts/**/"
+    filename: "sourcebinding.yaml"
+    parser_type: yaml
+    enabled: true
+    sections:
+      - name: full_file
+        yaml_path: .
+        rule_configs:
+          - name: metadata_rule
+            enabled: true
+        auto_approve: true
+
+  # Snowpipe configuration files - Low risk, can auto-approve
+  - name: "snowpipe_configs"
+    path: "dataproducts/**/"
+    filename: "snowpipeconfig.yaml"
+    parser_type: yaml
+    enabled: true
+    sections:
+      - name: full_file
+        yaml_path: .
+        rule_configs:
+          - name: metadata_rule
+            enabled: true
+        auto_approve: true
+
+  # Developer metadata files - Low risk, can auto-approve
+  - name: "developer_metadata"
+    path: "dataproducts/**/"
+    filename: "developers.yaml"
+    parser_type: yaml
+    enabled: true
+    sections:
+      - name: full_file
+        yaml_path: .
+        rule_configs:
+          - name: metadata_rule
+            enabled: true
+        auto_approve: true
+
+  # Masking files - Validated with masking_policy_rule
+  - name: "masking_files"
+    path: "dataproducts/**/"
+    filename: "*masking.{yaml,yml}"
+    parser_type: yaml
+    enabled: true
+    sections:
+      - name: full_file
+        yaml_path: .
+        rule_configs:
+          - name: masking_policy_rule
+            enabled: true
+        auto_approve: true
+
+  # Tag CR files - Validates tag configurations
+  - name: "tag_files"
+    path: "dataproducts/**/"
+    filename: "*tag*.{yaml,yml}"
+    parser_type: yaml
+    enabled: true
+    sections:
+      - name: full_file
+        yaml_path: .
+        rule_configs:
+          - name: tag_rule
+            enabled: true
+        auto_approve: true
+
+  # CODEOWNERS file - Auto-approve when synced with developers.yaml or groups/*.yaml
+  - name: "codeowners_file"
+    path: "**/"
+    filename: "CODEOWNERS"
+    parser_type: yaml
+    enabled: true
+    sections:
+      - name: codeowners_sync_validation
+        yaml_path: .
+        rule_configs:
+          - name: codeowners_sync_rule
+            enabled: true
+        auto_approve: true
+
+# STRICT POLICY ENFORCEMENT:
+# Any file type not explicitly configured above will require manual review by default.
+# This includes:
+#   - .sql files (migration scripts) - CRITICAL: Always require manual review
+#   - .gitlab-ci.yml (CI configuration) - Security-critical
+#   - .yaml/.yml files not matching patterns above - Require review
+#   - Any other file types - Default to manual review
+#
+# This implements the strict policy: "do not approve if MR has changes not covered in rules"

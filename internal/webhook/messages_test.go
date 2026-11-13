@@ -1,7 +1,6 @@
 package webhook
 
 import (
-	"strings"
 	"testing"
 	"time"
 
@@ -11,19 +10,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestNewMessageBuilder(t *testing.T) {
-	cfg := &config.Config{
-		Comments: config.CommentsConfig{
-			EnableMRComments: true,
-			CommentVerbosity: "detailed",
-		},
-	}
-
-	builder := NewMessageBuilder(cfg)
-	assert.NotNil(t, builder)
-	assert.Equal(t, cfg, builder.config)
-}
-
 func TestBuildApprovalComment_BasicVerbosity(t *testing.T) {
 	cfg := &config.Config{
 		Comments: config.CommentsConfig{
@@ -32,38 +18,134 @@ func TestBuildApprovalComment_BasicVerbosity(t *testing.T) {
 	}
 
 	builder := NewMessageBuilder(cfg)
-	
+
 	result := &shared.RuleEvaluation{
 		FinalDecision: shared.Decision{
 			Type:   shared.Approve,
 			Reason: "All warehouse changes are decreases",
 		},
-		RuleResults: []shared.RuleResult{
-			{
-				RuleName: "warehouse_rule",
-				Decision: shared.Decision{
-					Type:   shared.Approve,
-					Reason: "Warehouse decreases detected",
+		FileValidations: map[string]*shared.FileValidationSummary{
+			"test/product.yaml": {
+				FilePath:     "test/product.yaml",
+				TotalLines:   30,
+				CoveredLines: []shared.LineRange{{StartLine: 1, EndLine: 30}},
+				RuleResults: []shared.LineValidationResult{
+					{
+						RuleName:     "warehouse_rule",
+						Decision:     shared.Approve,
+						Reason:       "Warehouse decreases detected",
+						LineRanges:   []shared.LineRange{{StartLine: 1, EndLine: 30}},
+						WasEvaluated: true,
+					},
 				},
+				FileDecision: shared.Approve,
 			},
 		},
-		ExecutionTime: time.Millisecond * 150,
+		TotalFiles:     1,
+		ApprovedFiles:  1,
+		ReviewFiles:    0,
+		UncoveredFiles: 0,
+		ExecutionTime:  time.Millisecond * 150,
 	}
 
 	mrInfo := &gitlab.MRInfo{
 		ProjectID: 123,
 		MRIID:     456,
 		Author:    "testuser",
+		Title:     "Test warehouse decrease",
+	}
+
+	comment := builder.BuildApprovalComment(result, mrInfo)
+
+	assert.Contains(t, comment, "✅ **Auto-approved**")
+	assert.Contains(t, comment, "**What was checked:**")
+	assert.Contains(t, comment, "Warehouse decreases detected")
+}
+
+func TestBuildApprovalComment_ContainsIdentifier(t *testing.T) {
+	cfg := &config.Config{
+		Comments: config.CommentsConfig{
+			CommentVerbosity: "basic",
+		},
+	}
+
+	builder := NewMessageBuilder(cfg)
+
+	result := &shared.RuleEvaluation{
+		FinalDecision: shared.Decision{
+			Type:   shared.Approve,
+			Reason: "All changes approved",
+		},
+		FileValidations: map[string]*shared.FileValidationSummary{},
+		TotalFiles:      1,
+		ApprovedFiles:   1,
+		ExecutionTime:   time.Millisecond * 100,
+	}
+
+	mrInfo := &gitlab.MRInfo{
+		ProjectID: 123,
+		MRIID:     456,
+		Author:    "test-user",
 		Title:     "Test MR",
 	}
 
 	comment := builder.BuildApprovalComment(result, mrInfo)
 
-	// Verify basic comment structure
-	assert.Contains(t, comment, "✅ **Auto-approved after CI pipeline success**")
-	assert.Contains(t, comment, "📊 **Analysis Results:**")
-	assert.Contains(t, comment, "1 rules evaluated, all passed")
-	assert.Contains(t, comment, "🤖 *Automated by NAYSAYER v1.0.0*")
+	// Should contain the hidden identifier for approval comments
+	assert.Contains(t, comment, "<!-- naysayer-comment-id: approval -->")
+	assert.Contains(t, comment, "✅ **Auto-approved**")
+}
+
+func TestBuildManualReviewComment_ContainsIdentifier(t *testing.T) {
+	cfg := &config.Config{
+		Comments: config.CommentsConfig{
+			CommentVerbosity: "detailed",
+		},
+	}
+
+	builder := NewMessageBuilder(cfg)
+
+	result := &shared.RuleEvaluation{
+		FinalDecision: shared.Decision{
+			Type:   shared.ManualReview,
+			Reason: "High-risk changes detected",
+		},
+		FileValidations: map[string]*shared.FileValidationSummary{
+			"test/product.yaml": {
+				FilePath:     "test/product.yaml",
+				TotalLines:   20,
+				CoveredLines: []shared.LineRange{{StartLine: 1, EndLine: 20}},
+				RuleResults: []shared.LineValidationResult{
+					{
+						RuleName:   "warehouse_rule",
+						Decision:   shared.ManualReview,
+						Reason:     "High-risk warehouse changes",
+						LineRanges: []shared.LineRange{{StartLine: 10, EndLine: 15}},
+					},
+				},
+				FileDecision: shared.ManualReview,
+			},
+		},
+		TotalFiles:     1,
+		ApprovedFiles:  0,
+		ReviewFiles:    1,
+		UncoveredFiles: 0,
+		ExecutionTime:  time.Millisecond * 200,
+	}
+
+	mrInfo := &gitlab.MRInfo{
+		ProjectID: 123,
+		MRIID:     456,
+		Author:    "test-user",
+		Title:     "Test MR with high-risk changes",
+	}
+
+	comment := builder.BuildManualReviewComment(result, mrInfo)
+
+	// Should contain the hidden identifier for manual review comments
+	assert.Contains(t, comment, "<!-- naysayer-comment-id: manual-review -->")
+	assert.Contains(t, comment, "Manual review required")
+	assert.Contains(t, comment, "High-risk changes detected")
 }
 
 func TestBuildApprovalComment_DetailedVerbosity(t *testing.T) {
@@ -74,277 +156,35 @@ func TestBuildApprovalComment_DetailedVerbosity(t *testing.T) {
 	}
 
 	builder := NewMessageBuilder(cfg)
-	
+
 	result := &shared.RuleEvaluation{
 		FinalDecision: shared.Decision{
 			Type:   shared.Approve,
-			Reason: "All warehouse changes are decreases",
+			Reason: "Warehouse changes are safe",
 		},
-		RuleResults: []shared.RuleResult{
-			{
-				RuleName: "warehouse_rule",
-				Decision: shared.Decision{
-					Type:   shared.Approve,
-					Reason: "Warehouse decreases detected",
-				},
-				Metadata: map[string]any{
-					"analyzed_files": []string{"dataproducts/agg/bookings/prod/product.yaml"},
-					"warehouse_changes": []interface{}{"LARGE -> MEDIUM"},
-				},
-			},
-		},
-		ExecutionTime: time.Millisecond * 150,
+		FileValidations: map[string]*shared.FileValidationSummary{},
+		TotalFiles:      1,
+		ApprovedFiles:   1,
+		ReviewFiles:     0,
+		UncoveredFiles:  0,
+		ExecutionTime:   time.Millisecond * 100,
 	}
 
 	mrInfo := &gitlab.MRInfo{
-		ProjectID: 123,
-		MRIID:     456,
-		Author:    "testuser",
-		Title:     "Test MR",
+		ProjectID: 456,
+		MRIID:     789,
+		Author:    "developer",
+		Title:     "Safe warehouse changes",
 	}
 
 	comment := builder.BuildApprovalComment(result, mrInfo)
 
-	// Verify detailed comment structure
-	assert.Contains(t, comment, "✅ **Auto-approved after CI pipeline success**")
-	assert.Contains(t, comment, "📊 **Analysis Results:**")
-	assert.Contains(t, comment, "✅ warehouse_rule: Warehouse decreases detected")
-	assert.Contains(t, comment, "📄 **Files Analyzed:**")
-	assert.Contains(t, comment, "dataproducts/agg/bookings/prod/product.yaml")
-	assert.Contains(t, comment, "⏱️ **Processing Details:**")
-	assert.Contains(t, comment, "Rule evaluation time: 150ms")
-	assert.Contains(t, comment, "🤖 *Automated by NAYSAYER v1.0.0*")
+	assert.Contains(t, comment, "✅ **Auto-approved**")
+	assert.Contains(t, comment, "**What was checked:**")
+	// Note: Files section only appears when there are 3+ files
 }
 
-func TestBuildApprovalComment_DebugVerbosity(t *testing.T) {
-	cfg := &config.Config{
-		Comments: config.CommentsConfig{
-			CommentVerbosity: "debug",
-		},
-	}
-
-	builder := NewMessageBuilder(cfg)
-	
-	result := &shared.RuleEvaluation{
-		FinalDecision: shared.Decision{
-			Type:   shared.Approve,
-			Reason: "All warehouse changes are decreases",
-		},
-		RuleResults: []shared.RuleResult{
-			{
-				RuleName: "warehouse_rule",
-				Decision: shared.Decision{
-					Type:   shared.Approve,
-					Reason: "Warehouse decreases detected",
-				},
-				ExecutionTime: time.Millisecond * 50,
-				Metadata: map[string]any{
-					"analyzed_files": []string{"dataproducts/agg/bookings/prod/product.yaml"},
-				},
-			},
-		},
-		ExecutionTime: time.Millisecond * 150,
-	}
-
-	mrInfo := &gitlab.MRInfo{
-		ProjectID: 123,
-		MRIID:     456,
-		Author:    "testuser",
-		Title:     "Test MR",
-	}
-
-	comment := builder.BuildApprovalComment(result, mrInfo)
-
-	// Verify debug comment structure includes MR information
-	assert.Contains(t, comment, "🔍 **MR Information:**")
-	assert.Contains(t, comment, "Project ID: 123")
-	assert.Contains(t, comment, "MR IID: 456")
-	assert.Contains(t, comment, "Author: testuser")
-	assert.Contains(t, comment, "Title: Test MR")
-	assert.Contains(t, comment, "📊 **Detailed Analysis Results:**")
-	assert.Contains(t, comment, "⚙️ **System Details:**")
-}
-
-func TestBuildApprovalMessage_WarehouseChanges(t *testing.T) {
-	cfg := &config.Config{}
-	builder := NewMessageBuilder(cfg)
-
-	result := &shared.RuleEvaluation{
-		RuleResults: []shared.RuleResult{
-			{
-				RuleName: "warehouse_rule",
-				Decision: shared.Decision{Type: shared.Approve},
-				Metadata: map[string]any{
-					"warehouse_changes": []interface{}{"LARGE -> MEDIUM"},
-				},
-			},
-		},
-	}
-
-	message := builder.BuildApprovalMessage(result)
-	assert.Equal(t, "Auto-approved: Warehouse changes are safe (decreases only)", message)
-}
-
-func TestBuildApprovalMessage_DraftMR(t *testing.T) {
-	cfg := &config.Config{}
-	builder := NewMessageBuilder(cfg)
-
-	result := &shared.RuleEvaluation{
-		RuleResults: []shared.RuleResult{
-			{
-				RuleName: "draft_rule",
-				Decision: shared.Decision{Type: shared.Approve},
-				Metadata: map[string]any{
-					"is_draft": true,
-				},
-			},
-		},
-	}
-
-	message := builder.BuildApprovalMessage(result)
-	assert.Equal(t, "Auto-approved: Draft MR with dataverse-safe changes", message)
-}
-
-func TestBuildApprovalMessage_AutomatedUser(t *testing.T) {
-	cfg := &config.Config{}
-	builder := NewMessageBuilder(cfg)
-
-	result := &shared.RuleEvaluation{
-		RuleResults: []shared.RuleResult{
-			{
-				RuleName: "automated_user_rule",
-				Decision: shared.Decision{Type: shared.Approve},
-				Metadata: map[string]any{
-					"is_automated": true,
-				},
-			},
-		},
-	}
-
-	message := builder.BuildApprovalMessage(result)
-	assert.Equal(t, "Auto-approved: Automated user with passing CI", message)
-}
-
-func TestBuildApprovalMessage_DataverseFiles(t *testing.T) {
-	cfg := &config.Config{}
-	builder := NewMessageBuilder(cfg)
-
-	result := &shared.RuleEvaluation{
-		RuleResults: []shared.RuleResult{
-			{
-				RuleName: "warehouse_rule",
-				Decision: shared.Decision{Type: shared.Approve},
-			},
-		},
-	}
-
-	message := builder.BuildApprovalMessage(result)
-	assert.Equal(t, "Auto-approved: Only dataverse-safe files modified", message)
-}
-
-func TestBuildApprovalMessage_Default(t *testing.T) {
-	cfg := &config.Config{}
-	builder := NewMessageBuilder(cfg)
-
-	result := &shared.RuleEvaluation{
-		RuleResults: []shared.RuleResult{
-			{
-				RuleName: "generic_rule",
-				Decision: shared.Decision{Type: shared.Approve},
-			},
-		},
-	}
-
-	message := builder.BuildApprovalMessage(result)
-	assert.Equal(t, "Auto-approved: All rules passed after CI success", message)
-}
-
-func TestBuildRulesSummary(t *testing.T) {
-	cfg := &config.Config{}
-	builder := NewMessageBuilder(cfg)
-
-	ruleResults := []shared.RuleResult{
-		{
-			RuleName: "warehouse_rule",
-			Decision: shared.Decision{
-				Type:   shared.Approve,
-				Reason: "Warehouse decreases detected",
-			},
-		},
-		{
-			RuleName: "source_rule",
-			Decision: shared.Decision{
-				Type:   shared.ManualReview,
-				Reason: "Manual review required",
-			},
-		},
-	}
-
-	summary := builder.buildRulesSummary(ruleResults)
-
-	assert.Contains(t, summary, "✅ warehouse_rule: Warehouse decreases detected")
-	assert.Contains(t, summary, "🚫 source_rule: Manual review required")
-}
-
-func TestBuildFilesSummary(t *testing.T) {
-	cfg := &config.Config{}
-	builder := NewMessageBuilder(cfg)
-
-	result := &shared.RuleEvaluation{
-		RuleResults: []shared.RuleResult{
-			{
-				RuleName: "warehouse_rule",
-				Metadata: map[string]any{
-					"analyzed_files": []string{
-						"dataproducts/agg/bookings/prod/product.yaml",
-						"dataproducts/agg/costs/dev/product.yaml",
-					},
-					"warehouse_changes": []interface{}{"LARGE->MEDIUM", "SMALL->XSMALL"},
-				},
-			},
-		},
-	}
-
-	summary := builder.buildFilesSummary(result)
-
-	assert.Contains(t, summary, "dataproducts/agg/bookings/prod/product.yaml")
-	assert.Contains(t, summary, "dataproducts/agg/costs/dev/product.yaml")
-	assert.Contains(t, summary, "2 warehouse changes detected")
-}
-
-func TestHasWarehouseChanges(t *testing.T) {
-	cfg := &config.Config{}
-	builder := NewMessageBuilder(cfg)
-
-	// Test with warehouse changes
-	resultWithChanges := &shared.RuleEvaluation{
-		RuleResults: []shared.RuleResult{
-			{
-				RuleName: "warehouse_rule",
-				Decision: shared.Decision{Type: shared.Approve},
-				Metadata: map[string]any{
-					"warehouse_changes": []interface{}{"LARGE->MEDIUM"},
-				},
-			},
-		},
-	}
-
-	assert.True(t, builder.hasWarehouseChanges(resultWithChanges))
-
-	// Test without warehouse changes
-	resultWithoutChanges := &shared.RuleEvaluation{
-		RuleResults: []shared.RuleResult{
-			{
-				RuleName: "source_rule",
-				Decision: shared.Decision{Type: shared.Approve},
-			},
-		},
-	}
-
-	assert.False(t, builder.hasWarehouseChanges(resultWithoutChanges))
-}
-
-func TestComment_ContainsExpectedSections(t *testing.T) {
+func TestBuildManualReviewComment(t *testing.T) {
 	cfg := &config.Config{
 		Comments: config.CommentsConfig{
 			CommentVerbosity: "detailed",
@@ -352,46 +192,195 @@ func TestComment_ContainsExpectedSections(t *testing.T) {
 	}
 
 	builder := NewMessageBuilder(cfg)
-	
+
 	result := &shared.RuleEvaluation{
 		FinalDecision: shared.Decision{
-			Type:   shared.Approve,
-			Reason: "All rules passed",
+			Type:   shared.ManualReview,
+			Reason: "Manual review required: warehouse size increase detected",
 		},
-		RuleResults: []shared.RuleResult{
-			{
-				RuleName: "warehouse_rule",
-				Decision: shared.Decision{
-					Type:   shared.Approve,
-					Reason: "Safe warehouse changes",
+		FileValidations: map[string]*shared.FileValidationSummary{
+			"test/product.yaml": {
+				FilePath:     "test/product.yaml",
+				TotalLines:   30,
+				CoveredLines: []shared.LineRange{{StartLine: 1, EndLine: 30}},
+				RuleResults: []shared.LineValidationResult{
+					{
+						RuleName:   "warehouse_rule",
+						Decision:   shared.ManualReview,
+						Reason:     "Warehouse size increase detected",
+						LineRanges: []shared.LineRange{{StartLine: 1, EndLine: 30}},
+					},
 				},
+				FileDecision: shared.ManualReview,
 			},
 		},
-		ExecutionTime: time.Millisecond * 200,
+		TotalFiles:     1,
+		ApprovedFiles:  0,
+		ReviewFiles:    1,
+		UncoveredFiles: 0,
+		ExecutionTime:  time.Millisecond * 200,
 	}
 
 	mrInfo := &gitlab.MRInfo{
 		ProjectID: 123,
 		MRIID:     456,
 		Author:    "testuser",
-		Title:     "Test MR",
+		Title:     "Test warehouse increase",
+	}
+
+	comment := builder.BuildManualReviewComment(result, mrInfo)
+
+	assert.Contains(t, comment, "⚠️ **Manual review required**")
+	assert.Contains(t, comment, "**Why manual review is needed:**")
+	assert.Contains(t, comment, "warehouse size increase detected")
+	assert.Contains(t, comment, "**What was checked:**")
+}
+
+func TestBuildManualReviewComment_IncludesNonEvaluatedManualReviewReason(t *testing.T) {
+	cfg := &config.Config{
+		Comments: config.CommentsConfig{
+			CommentVerbosity: "detailed",
+		},
+	}
+
+	builder := NewMessageBuilder(cfg)
+	fallbackReason := "Manual review required: 'missing_metadata_rule' was not evaluated for changed section(s)"
+
+	result := &shared.RuleEvaluation{
+		FinalDecision: shared.Decision{
+			Type:   shared.ManualReview,
+			Reason: "One or more files require manual review",
+		},
+		FileValidations: map[string]*shared.FileValidationSummary{
+			"test/product.yaml": {
+				FilePath:     "test/product.yaml",
+				TotalLines:   2,
+				CoveredLines: []shared.LineRange{{StartLine: 1, EndLine: 2, FilePath: "test/product.yaml"}},
+				RuleResults: []shared.LineValidationResult{
+					{
+						RuleName:     "missing_metadata_rule",
+						Decision:     shared.ManualReview,
+						Reason:       fallbackReason,
+						LineRanges:   []shared.LineRange{{StartLine: 1, EndLine: 2, FilePath: "test/product.yaml"}},
+						WasEvaluated: false,
+					},
+				},
+				FileDecision: shared.ManualReview,
+			},
+		},
+		TotalFiles:     1,
+		ApprovedFiles:  0,
+		ReviewFiles:    1,
+		UncoveredFiles: 0,
+		ExecutionTime:  time.Millisecond * 50,
+	}
+
+	mrInfo := &gitlab.MRInfo{
+		ProjectID: 123,
+		MRIID:     456,
+		Author:    "testuser",
+		Title:     "Fallback reason visibility",
+	}
+
+	comment := builder.BuildManualReviewComment(result, mrInfo)
+
+	assert.Contains(t, comment, "**What was checked:**")
+	assert.Contains(t, comment, fallbackReason)
+}
+
+func TestBuildCommentOnlyComment(t *testing.T) {
+	cfg := &config.Config{
+		Comments: config.CommentsConfig{
+			CommentVerbosity: "detailed",
+		},
+	}
+
+	builder := NewMessageBuilder(cfg)
+
+	result := &shared.RuleEvaluation{
+		FinalDecision: shared.Decision{
+			Type:   shared.CommentOnly,
+			Reason: "All changed files are in the ignore list - no decision made",
+		},
+		FileValidations: make(map[string]*shared.FileValidationSummary),
+		IgnoredFiles:    []string{"migration.sql", ".gitlab-ci.yml"},
+		ExecutionTime:   time.Millisecond * 10,
+	}
+
+	comment := builder.BuildCommentOnlyComment(result)
+
+	assert.Contains(t, comment, "<!-- naysayer-comment-id: comment-only -->")
+	assert.Contains(t, comment, "All files ignored")
+	assert.Contains(t, comment, "no approval decision made")
+	assert.Contains(t, comment, "`migration.sql`")
+	assert.Contains(t, comment, "`.gitlab-ci.yml`")
+	assert.Contains(t, comment, "**Ignored files**")
+}
+
+func TestBuildIgnoredFilesSummary_InApprovalComment(t *testing.T) {
+	cfg := &config.Config{
+		Comments: config.CommentsConfig{
+			CommentVerbosity: "detailed",
+		},
+	}
+
+	builder := NewMessageBuilder(cfg)
+
+	result := &shared.RuleEvaluation{
+		FinalDecision: shared.Decision{
+			Type:   shared.Approve,
+			Reason: "All files passed validation",
+		},
+		FileValidations: map[string]*shared.FileValidationSummary{
+			"dataproducts/source/product.yaml": {
+				FilePath:     "dataproducts/source/product.yaml",
+				TotalLines:   20,
+				CoveredLines: []shared.LineRange{{StartLine: 1, EndLine: 20}},
+				RuleResults: []shared.LineValidationResult{
+					{
+						RuleName:     "metadata_rule",
+						Decision:     shared.Approve,
+						Reason:       "Metadata validated",
+						LineRanges:   []shared.LineRange{{StartLine: 1, EndLine: 20}},
+						WasEvaluated: true,
+					},
+				},
+				FileDecision: shared.Approve,
+			},
+		},
+		TotalFiles:    1,
+		ApprovedFiles: 1,
+		IgnoredFiles:  []string{"migration.sql"},
+		ExecutionTime: time.Millisecond * 50,
+	}
+
+	mrInfo := &gitlab.MRInfo{
+		ProjectID: 123,
+		MRIID:     456,
+		Author:    "testuser",
+		Title:     "Test with ignored files",
 	}
 
 	comment := builder.BuildApprovalComment(result, mrInfo)
 
-	// Verify all expected sections are present
-	expectedSections := []string{
-		"✅ **Auto-approved after CI pipeline success**",
-		"📊 **Analysis Results:**",
-		"⏱️ **Processing Details:**",
-		"🤖 *Automated by NAYSAYER v1.0.0*",
+	assert.Contains(t, comment, "✅ **Auto-approved**")
+	assert.Contains(t, comment, "**Ignored files** (not evaluated):")
+	assert.Contains(t, comment, "`migration.sql`")
+}
+
+func TestBuildIgnoredFilesSummary_Empty(t *testing.T) {
+	cfg := &config.Config{
+		Comments: config.CommentsConfig{
+			CommentVerbosity: "detailed",
+		},
 	}
 
-	for _, section := range expectedSections {
-		assert.Contains(t, comment, section, "Comment should contain section: %s", section)
+	builder := NewMessageBuilder(cfg)
+
+	result := &shared.RuleEvaluation{
+		IgnoredFiles: nil,
 	}
 
-	// Verify comment is properly formatted (has multiple lines)
-	lines := strings.Split(comment, "\n")
-	assert.Greater(t, len(lines), 5, "Comment should have multiple lines")
+	summary := builder.buildIgnoredFilesSummary(result)
+	assert.Empty(t, summary)
 }

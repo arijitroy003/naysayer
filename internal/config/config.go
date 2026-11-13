@@ -1,26 +1,32 @@
+// Package config provides configuration for the application.
 package config
 
 import (
 	"os"
+	"strconv"
 	"strings"
 )
 
 // Config holds application configuration
 type Config struct {
-	GitLab   GitLabConfig
-	Server   ServerConfig
-	Webhook  WebhookConfig
-	Comments CommentsConfig
-	Rules    RulesConfig
-	Approval ApprovalConfig
+	GitLab     GitLabConfig
+	Server     ServerConfig
+	Webhook    WebhookConfig
+	Comments   CommentsConfig
+	Rules      RulesConfig
+	Approval   ApprovalConfig
+	AutoRebase AutoRebaseConfig
+	StaleMR    StaleMRConfig
 }
 
 // GitLabConfig holds GitLab API configuration
 type GitLabConfig struct {
-	BaseURL     string
-	Token       string
-	InsecureTLS bool   // Skip TLS certificate verification
-	CACertPath  string // Path to custom CA certificate file
+	BaseURL                       string
+	Token                         string
+	GitlabFivetranRepositoryToken string // Optional: separate token for fivetran_terraform rebase
+	GitlabStaleMRToken            string // Optional: dedicated token for stale MR cleanup
+	InsecureTLS                   bool   // Skip TLS certificate verification
+	CACertPath                    string // Path to custom CA certificate file
 }
 
 // ServerConfig holds server configuration
@@ -36,63 +42,92 @@ type WebhookConfig struct {
 
 // CommentsConfig holds MR comments and messages configuration
 type CommentsConfig struct {
-	EnableMRComments bool   // Enable/disable MR commenting
-	CommentVerbosity string // Comment verbosity level (basic, detailed, debug)
+	EnableMRComments       bool   // Enable/disable MR commenting
+	CommentVerbosity       string // Comment verbosity level (basic, detailed, debug)
+	UpdateExistingComments bool   // Update existing comments instead of creating new ones
 }
 
 // RulesConfig holds rule-specific configuration
 type RulesConfig struct {
-	EnabledRules        []string // List of enabled rule names
-	DisabledRules       []string // List of disabled rule names
-	WarehouseRule       WarehouseRuleConfig
-	ServiceAccountRule  ServiceAccountRuleConfig
-	MigrationsRule      MigrationsRuleConfig
-	NamingRule          NamingRuleConfig
+	EnabledRules            []string                      // List of enabled rule names
+	DisabledRules           []string                      // List of disabled rule names
+	DataProductConsumerRule DataProductConsumerRuleConfig // Consumer access rule configuration
+	MigrationsRule          MigrationsRuleConfig          // Migrations validation configuration
+	NamingRule              NamingRuleConfig              // Naming conventions configuration
+	ServiceAccountRule      ServiceAccountRuleConfig      // Service account rule configuration
+	TOCApprovalRule         TOCApprovalRuleConfig         // TOC approval rule configuration
+	WarehouseRule           WarehouseRuleConfig           // Warehouse rule configuration
 }
 
 // WarehouseRuleConfig holds warehouse-specific configuration
 type WarehouseRuleConfig struct {
-	AllowTOCBypass      bool     // Allow bypassing TOC approval for specific cases
+	AllowTOCBypass       bool     // Allow bypassing TOC approval for specific cases
 	PlatformEnvironments []string // Environments requiring platform approval
-	AutoApproveEnvs     []string // Environments allowing auto-approval
+	AutoApproveEnvs      []string // Environments allowing auto-approval
 }
 
 // ServiceAccountRuleConfig holds service account validation configuration
 type ServiceAccountRuleConfig struct {
-	ValidateEmailFormat    bool     // Enable email format validation
-	RequireIndividualEmail bool     // Require individual vs group emails
-	AllowedDomains        []string // Allowed email domains
+	ValidateEmailFormat      bool     // Enable email format validation
+	RequireIndividualEmail   bool     // Require individual vs group emails
+	AllowedDomains           []string // Allowed email domains
+	AstroEnvironmentsOnly    []string // Environments where Astro service accounts are allowed
+	EnforceNamingConventions bool     // Enforce naming conventions
 }
 
-// MigrationsRuleConfig holds migrations validation configuration  
+// TOCApprovalRuleConfig holds TOC approval rule configuration
+type TOCApprovalRuleConfig struct {
+	CriticalEnvironments []string // Environments requiring TOC approval for new products
+}
+
+// DataProductConsumerRuleConfig holds data product consumer rule configuration
+type DataProductConsumerRuleConfig struct {
+	AllowedEnvironments []string // Environments where consumer access is allowed (preprod, prod)
+}
+
+// MigrationsRuleConfig holds migrations validation configuration
 type MigrationsRuleConfig struct {
-	RequirePlatformApproval bool // Always require platform approval
+	RequirePlatformApproval bool     // Always require platform approval
 	AllowSelfServicePaths   []string // Paths that allow self-service migrations
 }
 
 // NamingRuleConfig holds naming conventions configuration
 type NamingRuleConfig struct {
-	ValidateTagMatching     bool // Validate data_product tag matches product name
+	ValidateTagMatching      bool // Validate data_product tag matches product name
 	EnforceNamingConventions bool // Enforce naming conventions
 }
 
 // ApprovalConfig holds approval workflow configuration
 type ApprovalConfig struct {
-	EnableAutoApproval    bool   // Enable auto-approval functionality
-	EnableTOCWorkflow     bool   // Enable TOC approval workflow
-	EnablePlatformWorkflow bool  // Enable platform approval workflow
-	TOCGroupID            string // GitLab group ID for TOC team
-	PlatformGroupID       string // GitLab group ID for platform team
+	EnableAutoApproval     bool   // Enable auto-approval functionality
+	EnableTOCWorkflow      bool   // Enable TOC approval workflow
+	EnablePlatformWorkflow bool   // Enable platform approval workflow
+	TOCGroupID             string // GitLab group ID for TOC team
+	PlatformGroupID        string // GitLab group ID for platform team
+}
+
+// AutoRebaseConfig holds auto-rebase configuration
+type AutoRebaseConfig struct {
+	Enabled               bool   // Enable/disable auto-rebase feature
+	CheckAtlantisComments bool   // Check atlantis comments for plan failures (default: false)
+	RepositoryToken       string // Optional: repository-specific token (for backward compat with Fivetran)
+}
+
+// StaleMRConfig holds stale MR cleanup configuration
+type StaleMRConfig struct {
+	ClosureDays int // Days before closure (default: 30)
 }
 
 // Load loads configuration from environment variables
 func Load() *Config {
 	return &Config{
 		GitLab: GitLabConfig{
-			BaseURL:     getEnv("GITLAB_BASE_URL", "https://gitlab.com"),
-			Token:       getEnv("GITLAB_TOKEN", ""),
-			InsecureTLS: getEnv("GITLAB_INSECURE_TLS", "false") == "true",
-			CACertPath:  getEnv("GITLAB_CA_CERT_PATH", ""),
+			BaseURL:                       getEnv("GITLAB_BASE_URL", "https://gitlab.com"),
+			Token:                         getEnv("GITLAB_TOKEN", ""),
+			GitlabFivetranRepositoryToken: getEnv("GITLAB_TOKEN_FIVETRAN", ""), // Dedicated token for fivetran_terraform rebase
+			GitlabStaleMRToken:            getEnv("GITLAB_TOKEN_STALE_MR", ""), // Dedicated token for stale MR cleanup
+			InsecureTLS:                   getEnv("GITLAB_INSECURE_TLS", "false") == "true",
+			CACertPath:                    getEnv("GITLAB_CA_CERT_PATH", ""),
 		},
 		Server: ServerConfig{
 			Port: getEnv("PORT", "3000"),
@@ -102,21 +137,15 @@ func Load() *Config {
 			AllowedIPs: parseIPList(getEnv("WEBHOOK_ALLOWED_IPS", "")),
 		},
 		Comments: CommentsConfig{
-			EnableMRComments: getEnv("ENABLE_MR_COMMENTS", "true") == "true",
-			CommentVerbosity: getEnv("COMMENT_VERBOSITY", "detailed"),
+			EnableMRComments:       getEnv("ENABLE_MR_COMMENTS", "true") == "true",
+			CommentVerbosity:       getEnv("COMMENT_VERBOSITY", "detailed"),
+			UpdateExistingComments: getEnv("UPDATE_EXISTING_COMMENTS", "true") == "true",
 		},
 		Rules: RulesConfig{
 			EnabledRules:  parseStringList(getEnv("ENABLED_RULES", "")),
 			DisabledRules: parseStringList(getEnv("DISABLED_RULES", "")),
-			WarehouseRule: WarehouseRuleConfig{
-				AllowTOCBypass:       getEnv("WAREHOUSE_ALLOW_TOC_BYPASS", "false") == "true",
-				PlatformEnvironments: parseStringList(getEnv("WAREHOUSE_PLATFORM_ENVS", "preprod,prod")),
-				AutoApproveEnvs:      parseStringList(getEnv("WAREHOUSE_AUTO_APPROVE_ENVS", "dev,sandbox")),
-			},
-			ServiceAccountRule: ServiceAccountRuleConfig{
-				ValidateEmailFormat:    getEnv("SA_VALIDATE_EMAIL", "true") == "true",
-				RequireIndividualEmail: getEnv("SA_REQUIRE_INDIVIDUAL_EMAIL", "true") == "true",
-				AllowedDomains:         parseStringList(getEnv("SA_ALLOWED_DOMAINS", "redhat.com")),
+			DataProductConsumerRule: DataProductConsumerRuleConfig{
+				AllowedEnvironments: parseStringList(getEnv("DATAPRODUCT_CONSUMER_ENVS", "preprod,prod")),
 			},
 			MigrationsRule: MigrationsRuleConfig{
 				RequirePlatformApproval: getEnv("MIGRATIONS_REQUIRE_PLATFORM", "true") == "true",
@@ -126,13 +155,37 @@ func Load() *Config {
 				ValidateTagMatching:      getEnv("NAMING_VALIDATE_TAGS", "true") == "true",
 				EnforceNamingConventions: getEnv("NAMING_ENFORCE_CONVENTIONS", "true") == "true",
 			},
+			ServiceAccountRule: ServiceAccountRuleConfig{
+				ValidateEmailFormat:      getEnv("SA_VALIDATE_EMAIL", "true") == "true",
+				RequireIndividualEmail:   getEnv("SA_REQUIRE_INDIVIDUAL_EMAIL", "true") == "true",
+				AllowedDomains:           parseStringList(getEnv("SA_ALLOWED_DOMAINS", "redhat.com")),
+				AstroEnvironmentsOnly:    parseStringList(getEnv("SA_ASTRO_ENVS", "preprod,prod")),
+				EnforceNamingConventions: getEnv("SA_ENFORCE_NAMING", "true") == "true",
+			},
+			TOCApprovalRule: TOCApprovalRuleConfig{
+				CriticalEnvironments: parseStringList(getEnv("TOC_APPROVAL_ENVS", "preprod,prod")),
+			},
+			WarehouseRule: WarehouseRuleConfig{
+				AllowTOCBypass:       getEnv("WAREHOUSE_ALLOW_TOC_BYPASS", "false") == "true",
+				PlatformEnvironments: parseStringList(getEnv("WAREHOUSE_PLATFORM_ENVS", "preprod,prod")),
+				AutoApproveEnvs:      parseStringList(getEnv("WAREHOUSE_AUTO_APPROVE_ENVS", "dev,sandbox")),
+			},
 		},
 		Approval: ApprovalConfig{
 			EnableAutoApproval:     getEnv("ENABLE_AUTO_APPROVAL", "true") == "true",
 			EnableTOCWorkflow:      getEnv("ENABLE_TOC_WORKFLOW", "true") == "true",
 			EnablePlatformWorkflow: getEnv("ENABLE_PLATFORM_WORKFLOW", "true") == "true",
-			TOCGroupID:            getEnv("TOC_GROUP_ID", ""),
-			PlatformGroupID:       getEnv("PLATFORM_GROUP_ID", ""),
+			TOCGroupID:             getEnv("TOC_GROUP_ID", ""),
+			PlatformGroupID:        getEnv("PLATFORM_GROUP_ID", ""),
+		},
+		AutoRebase: AutoRebaseConfig{
+			Enabled:               getEnv("AUTO_REBASE_ENABLED", "true") == "true",
+			CheckAtlantisComments: getEnv("AUTO_REBASE_CHECK_ATLANTIS_COMMENTS", "true") == "true",
+			// Support both new and old env var names for backward compatibility
+			RepositoryToken: getEnv("AUTO_REBASE_REPOSITORY_TOKEN", getEnv("GITLAB_TOKEN_FIVETRAN", "")),
+		},
+		StaleMR: StaleMRConfig{
+			ClosureDays: getEnvInt("STALE_MR_CLOSURE_DAYS", 30),
 		},
 	}
 }
@@ -166,6 +219,15 @@ func (c *Config) WebhookSecurityMode() string {
 func getEnv(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
+	}
+	return defaultValue
+}
+
+func getEnvInt(key string, defaultValue int) int {
+	if value := os.Getenv(key); value != "" {
+		if intValue, err := strconv.Atoi(value); err == nil {
+			return intValue
+		}
 	}
 	return defaultValue
 }

@@ -5,13 +5,16 @@ import (
 	"encoding/json"
 	"io"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/redhat-data-and-ai/naysayer/internal/config"
-	"github.com/redhat-data-and-ai/naysayer/internal/rules/shared"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/redhat-data-and-ai/naysayer/internal/config"
+	"github.com/redhat-data-and-ai/naysayer/internal/gitlab"
+	"github.com/redhat-data-and-ai/naysayer/internal/rules/shared"
 )
 
 // MockRuleManager for testing
@@ -36,8 +39,12 @@ func (m *MockRuleManager) EvaluateAll(ctx *shared.MRContext) *shared.RuleEvaluat
 			Summary: "✅ Mock test passed",
 			Details: "All mock rules passed",
 		},
-		RuleResults:   []shared.RuleResult{},
-		ExecutionTime: time.Millisecond * 10,
+		FileValidations: map[string]*shared.FileValidationSummary{},
+		ExecutionTime:   time.Millisecond * 10,
+		TotalFiles:      0,
+		ApprovedFiles:   0,
+		ReviewFiles:     0,
+		UncoveredFiles:  0,
 	}
 }
 
@@ -58,12 +65,52 @@ func createTestConfig() *config.Config {
 		},
 		Webhook: config.WebhookConfig{
 
-			AllowedIPs:         []string{},
+			AllowedIPs: []string{},
 		},
 	}
 }
 
+func setupTestRulesFile(t *testing.T) {
+	tempRulesContent := `enabled: true
+
+files:
+  - name: "product_configs"
+    path: "**/"
+    filename: "product.{yaml,yml}"
+    parser_type: yaml
+    enabled: true
+    sections:
+      - name: warehouses
+        yaml_path: warehouses
+        required: true
+        rule_configs:
+          - name: warehouse_rule
+            enabled: true
+        auto_approve: false
+  - name: "documentation_files"
+    path: "**/"
+    filename: "*.md"
+    parser_type: yaml
+    enabled: true
+    sections:
+      - name: full_file
+        yaml_path: .
+        required: true
+        rule_configs:
+          - name: metadata_rule
+            enabled: true
+        auto_approve: true`
+
+	err := os.WriteFile("rules.yaml", []byte(tempRulesContent), 0644)
+	if err != nil {
+		t.Fatalf("Failed to create test rules file: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove("rules.yaml") })
+}
+
 func TestNewWebhookHandler(t *testing.T) {
+	setupTestRulesFile(t)
+
 	cfg := createTestConfig()
 	handler := NewDataProductConfigMrReviewHandler(cfg)
 
@@ -74,6 +121,7 @@ func TestNewWebhookHandler(t *testing.T) {
 }
 
 func TestWebhookHandler_HandleWebhook_Success(t *testing.T) {
+	setupTestRulesFile(t)
 	cfg := createTestConfig()
 	handler := NewDataProductConfigMrReviewHandler(cfg)
 
@@ -88,6 +136,7 @@ func TestWebhookHandler_HandleWebhook_Success(t *testing.T) {
 			"title":         "Update warehouse configuration",
 			"source_branch": "feature/update",
 			"target_branch": "main",
+			"state":         "opened",
 		},
 		"project": map[string]interface{}{
 			"id": 456,
@@ -108,7 +157,7 @@ func TestWebhookHandler_HandleWebhook_Success(t *testing.T) {
 	// Parse response
 	body, _ := io.ReadAll(resp.Body)
 	var response map[string]interface{}
-	json.Unmarshal(body, &response)
+	_ = json.Unmarshal(body, &response)
 
 	assert.Equal(t, "processed", response["webhook_response"])
 	assert.NotNil(t, response["decision"])
@@ -122,6 +171,7 @@ func TestWebhookHandler_HandleWebhook_Success(t *testing.T) {
 }
 
 func TestWebhookHandler_HandleWebhook_InvalidContentType(t *testing.T) {
+	setupTestRulesFile(t)
 	cfg := createTestConfig()
 	handler := NewDataProductConfigMrReviewHandler(cfg)
 
@@ -137,12 +187,13 @@ func TestWebhookHandler_HandleWebhook_InvalidContentType(t *testing.T) {
 
 	body, _ := io.ReadAll(resp.Body)
 	var response map[string]interface{}
-	json.Unmarshal(body, &response)
+	_ = json.Unmarshal(body, &response)
 
 	assert.Contains(t, response["error"], "Content-Type must be application/json")
 }
 
 func TestWebhookHandler_HandleWebhook_InvalidJSON(t *testing.T) {
+	setupTestRulesFile(t)
 	cfg := createTestConfig()
 	handler := NewDataProductConfigMrReviewHandler(cfg)
 
@@ -158,12 +209,13 @@ func TestWebhookHandler_HandleWebhook_InvalidJSON(t *testing.T) {
 
 	body, _ := io.ReadAll(resp.Body)
 	var response map[string]interface{}
-	json.Unmarshal(body, &response)
+	_ = json.Unmarshal(body, &response)
 
 	assert.Contains(t, response["error"], "Invalid JSON payload")
 }
 
 func TestWebhookHandler_HandleWebhook_NonMREvent(t *testing.T) {
+	setupTestRulesFile(t)
 	cfg := createTestConfig()
 	handler := NewDataProductConfigMrReviewHandler(cfg)
 
@@ -186,13 +238,13 @@ func TestWebhookHandler_HandleWebhook_NonMREvent(t *testing.T) {
 
 	body, _ := io.ReadAll(resp.Body)
 	var response map[string]interface{}
-	json.Unmarshal(body, &response)
+	_ = json.Unmarshal(body, &response)
 
-	assert.Contains(t, response["error"], "Unsupported event type: push")
-	assert.Contains(t, response["error"], "Only merge_request events are supported")
+	assert.Contains(t, response["error"], "missing object_attributes")
 }
 
 func TestWebhookHandler_HandleWebhook_InvalidMRInfo(t *testing.T) {
+	setupTestRulesFile(t)
 	cfg := createTestConfig()
 	handler := NewDataProductConfigMrReviewHandler(cfg)
 
@@ -219,14 +271,15 @@ func TestWebhookHandler_HandleWebhook_InvalidMRInfo(t *testing.T) {
 
 	body, _ := io.ReadAll(resp.Body)
 	var response map[string]interface{}
-	json.Unmarshal(body, &response)
+	_ = json.Unmarshal(body, &response)
 
-	assert.Contains(t, response["error"], "Missing MR information")
+	assert.Contains(t, response["error"], "missing project")
 }
 
 func TestWebhookHandler_HandleWebhook_APIFailureHandling(t *testing.T) {
 	// Test that the webhook handler correctly handles GitLab API failures
 	// by returning a manual review decision when it can't fetch MR changes
+	setupTestRulesFile(t)
 	cfg := createTestConfig()
 	handler := NewDataProductConfigMrReviewHandler(cfg)
 
@@ -240,6 +293,7 @@ func TestWebhookHandler_HandleWebhook_APIFailureHandling(t *testing.T) {
 			"title":         "Test MR",
 			"source_branch": "feature/test",
 			"target_branch": "main",
+			"state":         "opened",
 		},
 		"project": map[string]interface{}{
 			"id": 456,
@@ -259,7 +313,7 @@ func TestWebhookHandler_HandleWebhook_APIFailureHandling(t *testing.T) {
 
 	body, _ := io.ReadAll(resp.Body)
 	var response map[string]interface{}
-	json.Unmarshal(body, &response)
+	_ = json.Unmarshal(body, &response)
 
 	// When GitLab API fails, should return manual review decision
 	decision := response["decision"].(map[string]interface{})
@@ -270,6 +324,7 @@ func TestWebhookHandler_HandleWebhook_APIFailureHandling(t *testing.T) {
 }
 
 func TestWebhookHandler_HandleWebhook_LargePayload(t *testing.T) {
+	setupTestRulesFile(t)
 	cfg := createTestConfig()
 	handler := NewDataProductConfigMrReviewHandler(cfg)
 
@@ -284,6 +339,7 @@ func TestWebhookHandler_HandleWebhook_LargePayload(t *testing.T) {
 			"title":         "Large MR with many changes",
 			"source_branch": "feature/large-update",
 			"target_branch": "main",
+			"state":         "opened",
 			"description":   "This is a large MR with extensive changes across multiple files and directories for testing purposes.",
 		},
 		"project": map[string]interface{}{
@@ -309,7 +365,7 @@ func TestWebhookHandler_HandleWebhook_LargePayload(t *testing.T) {
 	// Should handle large payloads correctly and return manual review due to API failure
 	body, _ := io.ReadAll(resp.Body)
 	var response map[string]interface{}
-	json.Unmarshal(body, &response)
+	_ = json.Unmarshal(body, &response)
 
 	assert.Equal(t, "processed", response["webhook_response"])
 	decision := response["decision"].(map[string]interface{})
@@ -351,6 +407,7 @@ func TestWebhookHandler_ContentTypeVariations(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			setupTestRulesFile(t)
 			cfg := createTestConfig()
 			handler := NewDataProductConfigMrReviewHandler(cfg)
 
@@ -382,4 +439,194 @@ func TestWebhookHandler_ContentTypeVariations(t *testing.T) {
 			}
 		})
 	}
+}
+
+// MockGitLabClient for testing evaluateRules with custom changes
+type MockGitLabClient struct {
+	changes []gitlab.FileChange
+	err     error
+}
+
+func (m *MockGitLabClient) FetchFileContent(projectID int, filePath, ref string) (*gitlab.FileContent, error) {
+	return nil, nil
+}
+
+func (m *MockGitLabClient) GetMRTargetBranch(projectID, mrIID int) (string, error) {
+	return "main", nil
+}
+
+func (m *MockGitLabClient) GetMRDetails(projectID, mrIID int) (*gitlab.MRDetails, error) {
+	return nil, nil
+}
+
+func (m *MockGitLabClient) FetchMRChanges(projectID, mrIID int) ([]gitlab.FileChange, error) {
+	return m.changes, m.err
+}
+
+func (m *MockGitLabClient) AddMRComment(projectID, mrIID int, comment string) error {
+	return nil
+}
+
+func (m *MockGitLabClient) AddOrUpdateMRComment(projectID, mrIID int, commentBody, commentType string) error {
+	return nil
+}
+
+func (m *MockGitLabClient) ListMRComments(projectID, mrIID int) ([]gitlab.MRComment, error) {
+	return nil, nil
+}
+
+func (m *MockGitLabClient) UpdateMRComment(projectID, mrIID, commentID int, newBody string) error {
+	return nil
+}
+
+func (m *MockGitLabClient) FindLatestNaysayerComment(projectID, mrIID int, commentType ...string) (*gitlab.MRComment, error) {
+	return nil, nil
+}
+
+func (m *MockGitLabClient) ApproveMR(projectID, mrIID int) error {
+	return nil
+}
+
+func (m *MockGitLabClient) ApproveMRWithMessage(projectID, mrIID int, message string) error {
+	return nil
+}
+
+func (m *MockGitLabClient) ResetNaysayerApproval(projectID, mrIID int) error {
+	return nil
+}
+
+func (m *MockGitLabClient) GetCurrentBotUsername() (string, error) {
+	return "naysayer-bot", nil
+}
+
+func (m *MockGitLabClient) IsNaysayerBotAuthor(author map[string]interface{}) bool {
+	return false
+}
+
+func (m *MockGitLabClient) CompareBranches(sourceProjectID int, sourceBranch string, targetProjectID int, targetBranch string) (*gitlab.CompareResult, error) {
+	return &gitlab.CompareResult{Commits: []gitlab.CompareCommit{}}, nil
+}
+func (m *MockGitLabClient) GetBranchCommit(projectID int, branch string) (string, error) {
+	return "mock-sha", nil
+}
+func (m *MockGitLabClient) CompareCommits(projectID int, fromSHA, toSHA string) (*gitlab.CompareResult, error) {
+	return &gitlab.CompareResult{Commits: []gitlab.CompareCommit{}}, nil
+}
+
+func (m *MockGitLabClient) RebaseMR(projectID, mrIID int) (bool, error) {
+	return true, nil
+}
+
+func (m *MockGitLabClient) ListOpenMRs(projectID int) ([]int, error) {
+	return nil, nil
+}
+
+func (m *MockGitLabClient) ListOpenMRsWithDetails(projectID int) ([]gitlab.MRDetails, error) {
+	// Returns MRs created in last 7 days (mocked as empty)
+	return []gitlab.MRDetails{}, nil
+}
+
+func (m *MockGitLabClient) ListAllOpenMRsWithDetails(projectID int) ([]gitlab.MRDetails, error) {
+	// Returns ALL open MRs without date filter (mocked as empty)
+	// This is used by stale MR cleanup to find MRs older than 27-30 days
+	return []gitlab.MRDetails{}, nil
+}
+
+func (m *MockGitLabClient) CloseMR(projectID, mrIID int) error {
+	return nil
+}
+
+func (m *MockGitLabClient) FindCommentByPattern(projectID, mrIID int, pattern string) (bool, error) {
+	return false, nil
+}
+
+func (m *MockGitLabClient) GetPipelineJobs(projectID, pipelineID int) ([]gitlab.PipelineJob, error) {
+	return []gitlab.PipelineJob{}, nil
+}
+
+func (m *MockGitLabClient) GetJobTrace(projectID, jobID int) (string, error) {
+	return "", nil
+}
+
+func (m *MockGitLabClient) FindLatestAtlantisComment(projectID, mrIID int) (*gitlab.MRComment, error) {
+	return nil, nil
+}
+
+func (m *MockGitLabClient) AreAllPipelineJobsSucceeded(projectID, pipelineID int) (bool, error) {
+	return true, nil
+}
+
+func (m *MockGitLabClient) CheckAtlantisCommentForPlanFailures(projectID, mrIID int) (bool, string) {
+	return false, ""
+}
+
+func (m *MockGitLabClient) ListDirectoryFiles(projectID int, dirPath, ref string) ([]gitlab.RepositoryFile, error) {
+	return []gitlab.RepositoryFile{}, nil
+}
+
+// Test empty MR detection
+func TestEvaluateRules_EmptyMR(t *testing.T) {
+	setupTestRulesFile(t)
+	cfg := createTestConfig()
+
+	// Mock client returns empty changes array
+	mockClient := &MockGitLabClient{
+		changes: []gitlab.FileChange{}, // Empty - no files changed
+		err:     nil,
+	}
+
+	handler := NewDataProductConfigMrReviewHandlerWithClient(cfg, mockClient)
+
+	mrInfo := &gitlab.MRInfo{
+		ProjectID:    456,
+		MRIID:        123,
+		Title:        "Test Empty MR",
+		Author:       "testuser",
+		SourceBranch: "feature/test",
+		TargetBranch: "main",
+		State:        "opened",
+	}
+
+	result, err := handler.evaluateRules(456, 123, mrInfo)
+
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+	assert.Equal(t, shared.ManualReview, result.FinalDecision.Type)
+	assert.Contains(t, result.FinalDecision.Reason, "no file changes")
+	assert.Equal(t, "Empty MR", result.FinalDecision.Summary)
+}
+
+// Test net-zero changes detection
+func TestEvaluateRules_NetZeroChanges(t *testing.T) {
+	setupTestRulesFile(t)
+	cfg := createTestConfig()
+
+	// Mock client returns file changes but all diffs are empty
+	mockClient := &MockGitLabClient{
+		changes: []gitlab.FileChange{
+			{NewPath: "file1.txt", Diff: ""},
+			{NewPath: "file2.txt", Diff: ""},
+		},
+		err: nil,
+	}
+
+	handler := NewDataProductConfigMrReviewHandlerWithClient(cfg, mockClient)
+
+	mrInfo := &gitlab.MRInfo{
+		ProjectID:    456,
+		MRIID:        124,
+		Title:        "Test Net-Zero MR",
+		Author:       "testuser",
+		SourceBranch: "feature/net-zero",
+		TargetBranch: "main",
+		State:        "opened",
+	}
+
+	result, err := handler.evaluateRules(456, 124, mrInfo)
+
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+	assert.Equal(t, shared.ManualReview, result.FinalDecision.Type)
+	assert.Contains(t, result.FinalDecision.Reason, "no substantive changes")
+	assert.Equal(t, "Net-zero changes", result.FinalDecision.Summary)
 }

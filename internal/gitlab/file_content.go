@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/redhat-data-and-ai/naysayer/internal/logging"
 )
 
 // FileContent represents a file's content from GitLab API
@@ -32,7 +34,7 @@ func (c *Client) FetchFileContent(projectID int, filePath, ref string) (*FileCon
 	url := fmt.Sprintf("%s/api/v4/projects/%d/repository/files/%s?ref=%s",
 		strings.TrimRight(c.config.BaseURL, "/"), projectID, encodedPath, ref)
 
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -44,15 +46,15 @@ func (c *Client) FetchFileContent(projectID int, filePath, ref string) (*FileCon
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode == 404 {
+	if resp.StatusCode == http.StatusNotFound {
 		return nil, fmt.Errorf("file not found: %s", filePath)
 	}
 
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("GitLab API error %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("gitlab API error %d: %s", resp.StatusCode, string(body))
 	}
 
 	var fileContent FileContent
@@ -77,7 +79,7 @@ func (c *Client) GetMRTargetBranch(projectID, mrIID int) (string, error) {
 	url := fmt.Sprintf("%s/api/v4/projects/%d/merge_requests/%d",
 		strings.TrimRight(c.config.BaseURL, "/"), projectID, mrIID)
 
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
 	}
@@ -89,11 +91,11 @@ func (c *Client) GetMRTargetBranch(projectID, mrIID int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("GitLab API error %d: %s", resp.StatusCode, string(body))
+		return "", fmt.Errorf("gitlab API error %d: %s", resp.StatusCode, string(body))
 	}
 
 	var mr struct {
@@ -110,12 +112,43 @@ func (c *Client) GetMRTargetBranch(projectID, mrIID int) (string, error) {
 
 // MRDetails represents merge request details
 type MRDetails struct {
-	TargetBranch      string `json:"target_branch"`
-	SourceBranch      string `json:"source_branch"`
-	IID               int    `json:"iid"`
-	ProjectID         int    `json:"project_id"`         // Target project ID
-	SourceProjectID   int    `json:"source_project_id"`  // Source project ID (for cross-fork MRs)
-	TargetProjectID   int    `json:"target_project_id"`  // Target project ID (same as ProjectID)
+	TargetBranch         string      `json:"target_branch"`
+	SourceBranch         string      `json:"source_branch"`
+	Sha                  string      `json:"sha"` // HEAD of source branch (used for fork MR compare)
+	IID                  int         `json:"iid"`
+	ProjectID            int         `json:"project_id"`             // Target project ID
+	SourceProjectID      int         `json:"source_project_id"`      // Source project ID (for cross-fork MRs)
+	TargetProjectID      int         `json:"target_project_id"`      // Target project ID (same as ProjectID)
+	CreatedAt            string      `json:"created_at"`             // ISO 8601 format timestamp
+	UpdatedAt            string      `json:"updated_at"`             // ISO 8601 format timestamp of last activity
+	Pipeline             *MRPipeline `json:"pipeline"`               // Pipeline info (can be nil if no pipeline)
+	BehindCommitsCount   int         `json:"behind_commits_count"`   // Number of commits behind target branch
+	DivergedCommitsCount int         `json:"diverged_commits_count"` // Number of diverged commits
+	MergeStatus          string      `json:"merge_status"`           // "can_be_merged", "cannot_be_merged", "checking", "unchecked"
+	RebaseInProgress     bool        `json:"rebase_in_progress"`     // True if rebase is currently in progress
+	HasConflicts         bool        `json:"has_conflicts"`          // True if MR has merge conflicts
+}
+
+// MRPipeline represents pipeline information for an MR
+type MRPipeline struct {
+	ID     int    `json:"id"`
+	Status string `json:"status"` // running, pending, success, failed, canceled, skipped
+}
+
+// CompareResult represents the result of comparing two branches
+type CompareResult struct {
+	Commits []CompareCommit `json:"commits"`
+}
+
+// CompareCommit represents a commit in a compare result
+type CompareCommit struct {
+	ID            string `json:"id"`
+	ShortID       string `json:"short_id"`
+	Title         string `json:"title"`
+	AuthorName    string `json:"author_name"`
+	AuthorEmail   string `json:"author_email"`
+	CommittedDate string `json:"committed_date"`
+	Message       string `json:"message"`
 }
 
 // GetMRDetails fetches merge request details
@@ -123,7 +156,7 @@ func (c *Client) GetMRDetails(projectID, mrIID int) (*MRDetails, error) {
 	url := fmt.Sprintf("%s/api/v4/projects/%d/merge_requests/%d",
 		strings.TrimRight(c.config.BaseURL, "/"), projectID, mrIID)
 
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -135,11 +168,11 @@ func (c *Client) GetMRDetails(projectID, mrIID int) (*MRDetails, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("GitLab API error %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("gitlab API error %d: %s", resp.StatusCode, string(body))
 	}
 
 	var mrDetails MRDetails
@@ -148,4 +181,64 @@ func (c *Client) GetMRDetails(projectID, mrIID int) (*MRDetails, error) {
 	}
 
 	return &mrDetails, nil
+}
+
+// ListDirectoryFiles lists files in a directory using GitLab Repository Tree API
+// GET /projects/:id/repository/tree?path=:path&ref=:ref
+func (c *Client) ListDirectoryFiles(projectID int, dirPath, ref string) ([]RepositoryFile, error) {
+	var allFiles []RepositoryFile
+	page := 1
+	baseURL := fmt.Sprintf("%s/api/v4/projects/%d/repository/tree?path=%s&ref=%s&per_page=100",
+		strings.TrimRight(c.config.BaseURL, "/"),
+		projectID,
+		url.QueryEscape(dirPath),
+		url.QueryEscape(ref))
+
+	for {
+		apiURL := fmt.Sprintf("%s&page=%d", baseURL, page)
+
+		req, err := http.NewRequest(http.MethodGet, apiURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create list directory request: %w", err)
+		}
+
+		req.Header.Set("Authorization", "Bearer "+c.config.Token)
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list directory: %w", err)
+		}
+
+		if resp.StatusCode == http.StatusNotFound {
+			_ = resp.Body.Close()
+			if page == 1 {
+				return []RepositoryFile{}, nil // Directory doesn't exist, return empty list
+			}
+			logging.Info("ListDirectoryFiles pagination ended with 404 at page %d for path: %s", page, dirPath)
+			break // No more pages
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("gitlab API error %d: %s", resp.StatusCode, string(body))
+		}
+
+		var files []RepositoryFile
+		if err := json.NewDecoder(resp.Body).Decode(&files); err != nil {
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("failed to decode directory listing: %w", err)
+		}
+		_ = resp.Body.Close()
+
+		allFiles = append(allFiles, files...)
+
+		if resp.Header.Get("X-Next-Page") == "" {
+			break
+		}
+		page++
+	}
+
+	return allFiles, nil
 }

@@ -30,6 +30,7 @@ func TestClient_FetchMRChanges_Success(t *testing.T) {
 		// Verify request
 		assert.Equal(t, "GET", r.Method)
 		assert.Contains(t, r.URL.Path, "/api/v4/projects/123/merge_requests/456/changes")
+		assert.Equal(t, "true", r.URL.Query().Get("access_raw_diffs"))
 		assert.Equal(t, "Bearer test-token", r.Header.Get("Authorization"))
 		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
 
@@ -69,7 +70,7 @@ func TestClient_FetchMRChanges_Success(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(mockResponse)
+		_ = json.NewEncoder(w).Encode(mockResponse)
 	}))
 	defer server.Close()
 
@@ -135,7 +136,7 @@ func TestClient_FetchMRChanges_HTTPErrors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(tt.statusCode)
-				w.Write([]byte(tt.responseBody))
+				_, _ = w.Write([]byte(tt.responseBody))
 			}))
 			defer server.Close()
 
@@ -157,7 +158,7 @@ func TestClient_FetchMRChanges_HTTPErrors(t *testing.T) {
 func TestClient_FetchMRChanges_InvalidJSON(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"invalid": json}`)) // Invalid JSON
+		_, _ = w.Write([]byte(`{"invalid": json}`)) // Invalid JSON
 	}))
 	defer server.Close()
 
@@ -222,11 +223,12 @@ func TestClient_FetchMRChanges_URLConstruction(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var requestURL string
+			var requestPath, rawDiffs string
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				requestURL = r.URL.Path
+				requestPath = r.URL.Path
+				rawDiffs = r.URL.Query().Get("access_raw_diffs")
 				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(MRChanges{Changes: []struct {
+				_ = json.NewEncoder(w).Encode(MRChanges{Changes: []struct {
 					OldPath     string `json:"old_path"`
 					NewPath     string `json:"new_path"`
 					AMode       string `json:"a_mode"`
@@ -248,7 +250,8 @@ func TestClient_FetchMRChanges_URLConstruction(t *testing.T) {
 			_, err := client.FetchMRChanges(tt.projectID, tt.mrIID)
 
 			assert.NoError(t, err)
-			assert.Equal(t, tt.expectedURL, requestURL)
+			assert.Equal(t, tt.expectedURL, requestPath)
+			assert.Equal(t, "true", rawDiffs)
 		})
 	}
 }
@@ -527,7 +530,7 @@ func TestExtractMRInfo_PartialData(t *testing.T) {
 func TestClient_FetchMRChanges_EmptyResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(MRChanges{Changes: []struct {
+		_ = json.NewEncoder(w).Encode(MRChanges{Changes: []struct {
 			OldPath     string `json:"old_path"`
 			NewPath     string `json:"new_path"`
 			AMode       string `json:"a_mode"`
@@ -557,7 +560,7 @@ func TestClient_RequestHeaders(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedHeaders = r.Header
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(MRChanges{Changes: []struct {
+		_ = json.NewEncoder(w).Encode(MRChanges{Changes: []struct {
 			OldPath     string `json:"old_path"`
 			NewPath     string `json:"new_path"`
 			AMode       string `json:"a_mode"`

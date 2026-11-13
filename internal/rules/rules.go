@@ -1,37 +1,47 @@
 package rules
 
 import (
+	"fmt"
+
+	"github.com/redhat-data-and-ai/naysayer/internal/config"
 	"github.com/redhat-data-and-ai/naysayer/internal/gitlab"
 	"github.com/redhat-data-and-ai/naysayer/internal/rules/shared"
 )
 
 // CreateDataverseRuleManager creates a rule manager with rules for dataverse product config
 // This function now uses the extensible rule registry system
-func CreateDataverseRuleManager(gitlabClient *gitlab.Client) shared.RuleManager {
+func CreateDataverseRuleManager(gitlabClient gitlab.GitLabClient) shared.RuleManager {
 	registry := GetGlobalRegistry()
 	return registry.CreateDataverseRuleManager(gitlabClient)
 }
 
 // CreateCustomRuleManager creates a rule manager with specific rules
-func CreateCustomRuleManager(gitlabClient *gitlab.Client, ruleNames []string) (shared.RuleManager, error) {
+func CreateCustomRuleManager(gitlabClient gitlab.GitLabClient, ruleNames []string) (shared.RuleManager, error) {
 	registry := GetGlobalRegistry()
 	return registry.CreateRuleManager(gitlabClient, ruleNames)
 }
 
-// CreateRuleManagerByCategory creates a rule manager with rules from a specific category
-func CreateRuleManagerByCategory(gitlabClient *gitlab.Client, category string) shared.RuleManager {
-	registry := GetGlobalRegistry()
-	manager := NewSimpleRuleManager()
+// LoadRuleConfigFromPath loads rule configuration from a file path
+func LoadRuleConfigFromPath(configPath string) (*config.GlobalRuleConfig, error) {
+	return config.LoadRuleConfig(configPath)
+}
 
-	rules := registry.ListRulesByCategory(category)
-	for _, info := range rules {
-		if info.Enabled {
-			rule := info.Factory(gitlabClient)
-			manager.AddRule(rule)
-		}
+// NewSectionRuleManagerFromConfig creates a new section-based rule manager from config
+func NewSectionRuleManagerFromConfig(ruleConfig *config.GlobalRuleConfig, client gitlab.GitLabClient) shared.RuleManager {
+	return NewSectionRuleManager(ruleConfig, client)
+}
+
+// CreateSectionBasedDataverseManager creates a section-aware manager for dataverse workflows
+func CreateSectionBasedDataverseManager(client gitlab.GitLabClient) (shared.RuleManager, error) {
+	registry := GetGlobalRegistry()
+
+	// Create section-based manager - no fallback allowed
+	sectionManager, err := registry.CreateSectionBasedRuleManager(client, "rules.yaml")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create section-based rule manager: %w", err)
 	}
 
-	return manager
+	return sectionManager, nil
 }
 
 // ListAvailableRules returns information about all available rules

@@ -1,0 +1,31 @@
+// Package dataproduct_consumer provides types for the data product consumer rule.
+//
+//nolint:staticcheck // ST1003 accepted here
+package dataproduct_consumer
+
+// DataProductConsumerConfig holds configuration for consumer access validation
+type DataProductConsumerConfig struct {
+	// Environments where consumer access is allowed (preprod, prod)
+	AllowedEnvironments []string
+	// Whether environment matching is case-sensitive
+	CaseSensitive bool
+}
+
+// DefaultDataProductConsumerConfig returns default configuration
+func DefaultDataProductConsumerConfig() *DataProductConsumerConfig {
+	return &DataProductConsumerConfig{
+		AllowedEnvironments: []string{"preprod", "prod"},
+		CaseSensitive:       false,
+	}
+}
+
+// ConsumerContext holds analysis context for consumer changes
+type ConsumerContext struct {
+	FilePath           string
+	Environment        string
+	HasConsumers       bool
+	IsConsumerOnly     bool   // Only consumer fields are being modified
+	IsSelfConsumer     bool   // Product is added as consumer of itself
+	IsSafeMetadataOnly bool   // Only non-consumer safe changes are added/modified/deleted
+	SelfConsumerName   string // Name of the self-consumer (for error message)
+}

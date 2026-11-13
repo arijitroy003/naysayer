@@ -1,0 +1,16 @@
+name: "Warehouse size decrease"
+description: "Warehouse size decrease requires manual review (all warehouse changes need manual approval)"
+
+expected:
+  decision: ManualReview
+  approved: false
+
+  comment_contains:
+    - "Warehouse size decrease detected"
+    - "user warehouse"
+
+mr_metadata:
+  title: "Scale down warehouse to reduce costs"
+  author: "testuser"
+  source_branch: "feature/warehouse-scale-down"
+  target_branch: "main"
